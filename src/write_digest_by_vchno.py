@@ -41,7 +41,9 @@ def main():
     ap.add_argument("--ar-no", required=True)
     ap.add_argument("--company", required=True)
     ap.add_argument("--expect", default="", help="★ SF-30：打开凭证前用「摘要含该词」二次锚定"
-                    "（同字号跨字组重复时必传；通常传客户名）")
+                    "（同字号跨字组重复时必传；通常传客户名）。"
+                    "★ 补摘要场景：摘要还没写，客户名不在摘要里，传 expect 会跳过正确凭证"
+                    "⇒ 默认不传，除非显式给 --expect")
     ap.add_argument("--date-range", default="", help="账务日期过滤区间 start,end（如 2026-10-01,2026-10-31）。"
                     "★ 凭证查询默认过滤上一期，跨期凭证必传，否则翻遍列表也找不到")
     ap.add_argument("--go", action="store_true")
@@ -63,7 +65,7 @@ def main():
             ui = KingdeeUI(pg, CFG, log, GUARD)
 
             if not open_voucher(pg, ui, log, args.zi, args.no,
-                                expect=(args.expect or args.company),
+                                expect=(args.expect or None),
                                 date_range=date_range):
                 raise RuntimeError(f"没能打开 {args.zi}{args.no} 的可编辑页")
             pg.wait_for_timeout(1500)

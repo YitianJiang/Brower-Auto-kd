@@ -179,8 +179,9 @@ def locate_row(pg, ui, log, zi, no, rows=220, expect=None):
 def open_voucher(pg, ui, log, zi, no, rows=220, expect=None, date_range=None):
     """定位 → 滚到行 → 双击 → 激活「凭证 - 修改」。返回是否成功。
     expect: 摘要须含该关键词（SF-30：同字号跨字组重复时用摘要二次锚定）。
-    date_range: (start, end) 可选 —— 打开「凭证查询」后先按账务日期 FDate1 过滤
-        （★ 凭证查询默认过滤 = 上一期，10 月凭证查不到；必须先改期间）。
+    date_range: (start, end) 可选 —— 打开「凭证查询」后先按「日期」FDATE 过滤
+        （★ 凭证查询默认过滤 = 上一期，10 月凭证查不到；必须先改期间。
+           ★★ 字段是 FDATE，不是应收单/出库单的 FDate1 —— 凭证查询列表无账务日期字段）。
     """
     pg.keyboard.press("Escape")
     pg.wait_for_timeout(700)
@@ -197,8 +198,8 @@ def open_voucher(pg, ui, log, zi, no, rows=220, expect=None, date_range=None):
             return False
 
     if date_range:
-        log.info(f"先设账务日期过滤：FDate1 {date_range[0]} ~ {date_range[1]}")
-        ui.set_date_filter(date_range[0], date_range[1], field="FDate1")
+        log.info(f"先设日期过滤：FDATE {date_range[0]} ~ {date_range[1]}")
+        ui.set_date_filter(date_range[0], date_range[1], field="FDATE")
         pg.wait_for_timeout(3000)
 
     pno, idx = locate_row(pg, ui, log, zi, no, rows=rows, expect=expect)

@@ -456,7 +456,39 @@ def step_invoice(ui, args, ar_no):
     except Exception as e:  # noqa: BLE001
         log.warn(f"按单号过滤失败（{str(e)[:100]}），退回直接勾选（可能翻不到页）")
     n = ui.select_rows([ar_no])
-    log.info(f"应收单列表勾选 {ar_no} → {n} 张")
+    real = ui.selected_count()
+    log.info(f"应收单列表勾选 {ar_no} → 命中 {n} 行，真实选中 {real} 行")
+    # ★★ 2026-10-28 护栏（华淳蓝字错账 SF-58）：应收单明细多行时，select_rows 勾选
+    #   会被虚拟滚动截断（77 行只真实选中 76 行）→ 专票漏 1 行、金额少 520 元。
+    #   判据用「服务端应收单明细行数」作权威基准（不依赖界面的反证源，见 MEMORY SF-56）：
+    #   界面的 select_rows 命中数 n 可能因虚拟滚动漏扫而偏小（n=76 且 real=76 也能漏），
+    #   所以必须拿 ExecuteBillQuery 的真实明细行数 expected 来卡。
+    try:
+        from kdquery import KdQuery
+        _kq = KdQuery(ui.page)
+        _detail = _kq.rows("AR_receivable", "FBillNo,FMATERIALID.FNumber",
+                           f"FBillNo = '{ar_no}'", top=2000)
+        expected = len(_detail)
+    except Exception as e:  # noqa: BLE001
+        expected = None
+        log.warn(f"读应收单服务端明细行数失败（{str(e)[:100]}），退回只卡命中数")
+    log.info(f"应收单 {ar_no} 服务端明细行数 = {expected}，命中 {n}，真实选中 {real}")
+    if expected is not None and real != expected:
+        # 已按单号过滤成只这一张单，全选 = 选中其全部明细行，天然不漏（不依赖逐行滚动点击）。
+        log.warn(f"逐行勾选漏行（{real}/{expected}），改用表头全选重勾")
+        ui.clear_selection()
+        real = ui.select_all_rows()
+        log.info(f"全选后真实选中 {real} 行")
+    if expected is not None and real != expected:
+        shot(ui.page, SHOT_DIR, "select_truncated", log)
+        raise RuntimeError(
+            f"应收单 {ar_no} 勾选行数不符：服务端明细 {expected} 行，命中 {n} 行，真实选中 {real} 行 —— "
+            f"虚拟滚动/分页导致漏勾，专票会少行错账。已停止，请人工核对后重试。")
+    if expected is None and (real is None or real < n):
+        shot(ui.page, SHOT_DIR, "select_truncated", log)
+        raise RuntimeError(
+            f"应收单 {ar_no} 勾选被截断：命中 {n} 行，真实选中 {real} 行 —— "
+            f"虚拟滚动/分页导致漏勾，专票会少行错账。已停止，请人工检查应收单明细行数后重试。")
     ui.push_to_invoice(merge=merge)
     if not ui.activate_tab("销售增值税专用发票 - 新增", timeout_ms=10000):
         raise RuntimeError("没等到专票标签，下推可能失败")
