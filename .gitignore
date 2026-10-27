@@ -1,0 +1,59 @@
+# ===== 敏感：绝不进 git =====
+# 浏览器登录态（含金蝶会话 cookie/token）
+chrome-profile/
+chrome-profile/**
+# 真实业务数据
+data/
+# 运行产物 / 日志（含客户名、金额、界面文本）
+output/
+logs/
+# Python 缓存
+__pycache__/
+*.pyc
+# 本地配置（可能含个人改动；config.yaml 本身无密码，但为安全默认忽略，用 config.example.yaml 模板）
+config.yaml
+
+# ===== 其他临时/系统文件 =====
+*.log
+.DS_Store
+Thumbs.db
+
+# ===== 一次性探针/调试脚本（不随仓库走，保留本机现场即可）=====
+# 根目录：所有下划线开头的临时脚本
+/_*.py
+# src 下的一次性诊断/单家调试脚本
+src/probe_*.py
+src/probe*.py
+src/diag_*.py
+src/gy_*.py
+src/gy_clean.py
+src/gy_adjust.py
+src/gy_adjust2.py
+src/gy_banner_probe.py
+src/gy_cell_test*.py
+src/gy_close*.py
+src/gy_closetab.py
+src/gy_fill.py
+src/gy_inv*.py
+src/gy_probe2.py
+src/gy_quit*.py
+src/gy_reset.py
+src/gy_save.py
+src/gy_step1.py
+src/gy_vch*.py
+src/gy_verify.py
+src/verify_*.py
+src/xcheck_*.py
+src/preview_digest_from_ost.py
+src/inspect_desktop.py
+src/peek_tab.py
+src/peek_tabs.py
+src/peek_tabs_now.py
+src/test_open.py
+src/smoke.py
+src/precheck_20261031.py
+src/precheck_batch.py
+src/precheck_repush.py
+src/dump_receipt_detail.py
+src/recompute_digest.py
+src/set_bill_date.py
