@@ -35,9 +35,10 @@
 ### 部署后你只需手动做两件事（换机器必然要做，脚本替不了）
 
 1. **在弹出的 Chrome 里登录金蝶**，登录后保持窗口开着（登录态不随 git 走）
-2. **把本期的「开票数据.xlsx」放进 `data/`**（业务数据不进 git）
+2. **在对话框里直接上传本期的「下推.xlsx」**（业务数据不进 git、不落 data/，交给 WorkBuddy 接手）
 
-做完这两步，对 WorkBuddy 说「**金蝶批量下推**」即可，剩下的交给它跑批 + 排障。
+做完这两步，对 WorkBuddy 说「**金蝶批量下推**」并 @ 这个 skill，剩下交给它跑批 + 排障。
+WorkBuddy 拿到你上传的文件后会用它作为数据源跑批（`run_batch_*.py --xl <你上传的路径>`），无需你手动放文件。
 
 > 若运行报错「python 不是内部或外部命令」，说明 Python 自动安装没成功，手动装一个
 > Python 3.10+ 并勾选「Add to PATH」后重跑本脚本即可。
@@ -62,7 +63,8 @@ cp config.example.yaml config.yaml   # Windows: copy config.example.yaml config.
 cd kingdee-rpa
 python start_browser.py                                        # 启动调试浏览器（登录金蝶用）
 python src/run_batch_20261031.py --precheck                    # 开跑前自检（页签护栏/选择器）
-python src/run_batch_20261031.py                               # 整批下推（读 data/ 里的单据）
+python src/run_batch_20261031.py                               # 整批下推（读默认数据源）
+python src/run_batch_20261031.py --xl <上传的xlsx路径>          # 指定数据源（对话框上传的文件用这个）
 python src/push_chain.py --ar-no <应收单号> --step voucher --yes   # 半成品续跑：补专票→凭证→摘要
 python src/write_digest.py --ar-no <应收单号> --company <客户> --go  # 补写摘要
 python src/write_digest_by_vchno.py --no <凭证号> --ar-no <应收单号> --company <客户> --go  # 凭证已生成只补摘要

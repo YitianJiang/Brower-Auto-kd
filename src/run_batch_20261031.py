@@ -60,9 +60,9 @@ def sn2date(s):
     return (datetime(1899, 12, 30) + timedelta(days=int(s))).strftime("%Y-%m-%d")
 
 
-def load_items():
+def load_items(xl=XL):
     import openpyxl
-    wb = openpyxl.load_workbook(XL, data_only=True)
+    wb = openpyxl.load_workbook(xl, data_only=True)
     ws = wb["Sheet1"]
     items = []
     for r in ws.iter_rows(min_row=2, values_only=True):
@@ -301,9 +301,11 @@ def main():
     ap.add_argument("--precheck", action="store_true")
     ap.add_argument("--only", default="")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--xl", default="", help="开票数据 xlsx 路径（默认读桌面写死的下推.xlsx；从对话框上传的文件用这个指向）")
     a = ap.parse_args()
 
-    items = [it for it in load_items() if it["customer"] not in SKIP]
+    xl_path = a.xl or XL
+    items = [it for it in load_items(xl_path) if it["customer"] not in SKIP]
     if a.only:
         items = [x for x in items if x["customer"] == a.only]
         if not items:
