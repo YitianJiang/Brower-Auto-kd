@@ -10,6 +10,9 @@ logs/
 # Python 缓存
 __pycache__/
 *.pyc
+# 仓库本地自动安装的 Python 运行时（不进 git）
+.python/
+python_installer.exe
 # 本地配置（可能含个人改动；config.yaml 本身无密码，但为安全默认忽略，用 config.example.yaml 模板）
 config.yaml
 

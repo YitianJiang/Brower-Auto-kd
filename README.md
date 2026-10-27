@@ -1,142 +1,72 @@
-# 金蝶云星空 8.2.0 开票流程自动化
+# 金蝶云星空 8.2.0 开票流程自动化（RPA）
 
-销售出库单 → 下推应收单 → 下推增值税专用发票（分录合并）→ 生成凭证并改摘要
+销售出库单 → 下推应收单 → 下推增值税专用发票（分录合并）→ 生成凭证 → 改摘要
 
-路线：**网页端浏览器自动化**（WebAPI 未开放）。数据由 Excel 驱动。
+路线：**网页端浏览器自动化**（WebAPI 未开放）。数据由 Excel 驱动，Playwright 接管**已登录的 Chrome**（CDP）。
 
 ---
 
-## 当前进度
+## 仓库说明
 
-| 阶段 | 状态 |
+本仓库 = **项目代码 + skill 包**，一次 clone 全拿到，换机器直接复用。
+
+| 目录 | 内容 |
 |---|---|
-| 可行性分析 | ✅ 完成 |
-| 环境（Python + Playwright + openpyxl） | ✅ 完成 |
-| 项目骨架 / 配置 / Excel 模板 / 护栏 | ✅ 完成 |
-| 数据处理逻辑（分组、日期区间、例外、校验） | ✅ 已验证 |
-| **操作录制器** | ✅ 完成，**等你开录** |
-| 界面操作步骤实现 | ⏳ 拿到你的操作轨迹后写 |
-| 空跑 / 小批量 / 全量 | ⏳ 后续 |
-
-界面步骤（`src/steps.py`）现在是 `raise NotImplementedError` 状态——故意的，没摸清界面前不让脚本瞎点。
+| `src/` | 核心生产脚本（下推/填单/开票/凭证/摘要/批量编排/自检） |
+| `skill/` | 通用 skill 包（SKILL.md + references/ 文档 + scripts/ 的 kd_* 通用脚本） |
+| `docs/` | 界面结构速查、下推链复用指南、静默失败清单 |
+| `tests/` | 单元测试（摘要规则、折扣） |
+| `setup_new_machine.py` | 新机器一键部署（含自动装 Python） |
+| `新机器一键部署.bat` | Windows 双击入口 |
 
 ---
 
-## 现在你要做的：操作一遍，我看着学
+## 新机器一键部署（换机器看这里）
 
-### 1. 启动调试浏览器并登录
+**双击 `新机器一键部署.bat`**（或命令行 `python setup_new_machine.py --all`），脚本自动完成：
 
-双击 **`启动调试浏览器.bat`** → 打开一个**独立 Chrome**（和你日常用的完全隔离）→ 登录金蝶 → **保持窗口开着**。
+1. **检测并自动安装 Python**（没有就装到本仓库 `.python/` 下，不污染系统）
+2. 装依赖（playwright / openpyxl / PyYAML + Chromium 内核，走清华镜像）
+3. 补 `config.yaml`（从 `config.example.yaml` 复制，`base_url` 已带默认值）
+4. 装 skill 包（拷到 `~/.workbuddy/skills/`，WorkBuddy 自动加载）
+5. 启动调试浏览器（独立 Chrome，端口 9222）
+6. 开跑前自检（`--precheck`）
 
-> bat 本身只做一件事：调用 `start_browser.py`（中文提示都在 Python 里，避免 cmd 的 GBK 编码问题）。
-> 启动器会自动检测浏览器路径、检查 9222 端口是否已被占用，并确认调试端口真的就绪后才提示你。
-> 要用 Edge 就跑 `python start_browser.py --browser edge`。
+### 部署后你只需手动做两件事（换机器必然要做，脚本替不了）
 
-### 2. 开始录制
+1. **在弹出的 Chrome 里登录金蝶**，登录后保持窗口开着（登录态不随 git 走）
+2. **把本期的「开票数据.xlsx」放进 `data/`**（业务数据不进 git）
+
+做完这两步，对 WorkBuddy 说「**金蝶批量下推**」即可，剩下的交给它跑批 + 排障。
+
+> 若运行报错「python 不是内部或外部命令」，说明 Python 自动安装没成功，手动装一个
+> Python 3.10+ 并勾选「Add to PATH」后重跑本脚本即可。
+
+---
+
+## 手动部署（可选，不推荐）
+
+已有 Python 3.10+ 时，可跳过一键脚本手动做：
+
+```bash
+python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+python -m playwright install chromium
+cp config.example.yaml config.yaml   # Windows: copy config.example.yaml config.yaml
+```
+
+---
+
+## 核心脚本速查
 
 ```bash
 cd kingdee-rpa
-C:/Users/Administrator/.workbuddy/binaries/python/envs/default/Scripts/python.exe src/record.py
-```
-
-看到「录制已开始」后，**在浏览器里正常操作**，完整地走一遍：
-
-> 销售出库单列表（设日期区间筛选）→ 勾选 → 下推应收单 → 应收单列表 → 勾选 → 下推增值税专用发票（分录合并）→ 填开票人/业务日期/发票日期 → 生成凭证 → 改摘要 → 保存
-
-**操作完回到命令行按 `Ctrl+C`**，会自动生成三样东西：
-
-| 文件 | 内容 |
-|---|---|
-| `output/capture/trace_*.jsonl` | 完整事件流（点了什么、填了什么、元素 xpath/id/class/祖先文本） |
-| `output/screenshots/seq_*.png` | 按步截图 |
-| `output/capture/summary_*.md` | 人能读的操作序列表格（我看这个总结 SOP） |
-
-> 录制器对所有标签页和 iframe 都生效（金蝶大量用 iframe），动态新开的子框架也会自动注入监听。
-
-录完告诉我一声，我读轨迹总结操作模式，再把 `src/steps.py` 填上。
-
----
-
-## Excel 字段口径
-
-`data/开票数据.xlsx`（前 12 列输入，后 5 列脚本回写）
-
-**填进金蝶的只有三个字段**：`开票人`、`业务日期`、`发票日期`。
-**发票号码不填**。
-
-### 分组规则（决定哪几张出库单合成一张金蝶发票）
-
-默认按 **「客户名称 + 发票日期」** 分组——同客户同一天开的算一张票，一起勾选后下推时选「分录合并」。
-
-只有当你需要打破这个规则（比如同客户同一天要开两张票）时，才在最后那列 **`发票号`** 填不同的号来强制拆分。**平时留空即可。**
-
-### 日期区间
-
-留空 = 默认「上月26号 ~ 当月25号」。
-**只有例外的才在 `日期区间例外` 列写**，格式 `2026-08-26~2026-09-25`。
-这比你另写文档说明稳——机器不会理解错。
-
-### 先自测分组
-
-```bash
-python src/run.py --plan
-```
-
-**不连浏览器、不碰金蝶**，只打印分组结果、每张票的金额合计、日期区间，并校验组内客户/开票人/日期是否一致。有问题会用 `!!` 标出来。
-
----
-
-## 目录结构
-
-```
-kingdee-rpa/
-├── 启动调试浏览器.bat     # 双击入口（纯英文，内部调 start_browser.py）
-├── start_browser.py       # 启动器本体：找浏览器/查端口/验证就绪
-├── config.yaml            # 所有配置（安全开关都在这）
-├── make_template.py       # 重新生成 Excel 模板
-├── README.md
-├── data/
-│   └── 开票数据.xlsx      # ← 填这里
-├── src/
-│   ├── common.py          # 配置/日志/截图/护栏/Excel读写/日期规则/分组
-│   ├── record.py          # 操作录制器 ← 现在用它
-│   ├── capture.py         # 静态采集界面结构（辅助）
-│   ├── steps.py           # 界面操作步骤（TODO，待轨迹采集后填）
-│   └── run.py             # 主流程编排
-└── output/                # 自动创建
-    ├── logs/              # 运行日志
-    ├── screenshots/       # 截图存档
-    ├── capture/           # 轨迹 JSON / 摘要
-    └── 结果回写.xlsx
-```
-
----
-
-## 新机器一键部署
-
-换机器 / 新环境，clone 下来后**双击 `新机器一键部署.bat`**（或跑 `python setup_new_machine.py --all`）即可，自动完成：
-
-1. 装依赖（playwright / openpyxl / PyYAML + Chromium 内核）
-2. 补 `config.yaml`（从 `config.example.yaml` 复制）
-3. 装 skill 包（拷到 `~/.workbuddy/skills/`，WorkBuddy 自动加载）
-4. 启动调试浏览器（独立 Chrome，端口 9222）
-5. 开跑前自检（`--precheck`）
-
-装完只需手动做两件事（换机器必然要做）：① 打开 `config.yaml` 填 `base_url`（金蝶地址）；
-② 在弹出来的浏览器里登录金蝶。之后即可正常跑批。
-
-## 命令速查
-
-```bash
-PY="C:/Users/Administrator/.workbuddy/binaries/python/envs/default/Scripts/python.exe"
-cd kingdee-rpa
-
-$PY make_template.py              # 重新生成 Excel 模板
-$PY src/run.py --plan             # 解析 Excel 打印计划，安全，随时可跑
-$PY src/record.py                 # 录制你的操作（Ctrl+C 停止）
-$PY src/record.py --tag 下推发票   # 分段录制，起个名
-$PY src/capture.py --list         # 列出调试浏览器里的标签页
-$PY src/run.py --limit 3          # 正式跑，只处理前 3 组（界面步骤实现后可用）
+python start_browser.py                                        # 启动调试浏览器（登录金蝶用）
+python src/run_batch_20261031.py --precheck                    # 开跑前自检（页签护栏/选择器）
+python src/run_batch_20261031.py                               # 整批下推（读 data/ 里的单据）
+python src/push_chain.py --ar-no <应收单号> --step voucher --yes   # 半成品续跑：补专票→凭证→摘要
+python src/write_digest.py --ar-no <应收单号> --company <客户> --go  # 补写摘要
+python src/write_digest_by_vchno.py --no <凭证号> --ar-no <应收单号> --company <客户> --go  # 凭证已生成只补摘要
+python src/clean_tabs.py --go --keep-name 销售出库单列表       # 清场（保留工作锚点）
 ```
 
 ---
@@ -151,56 +81,38 @@ auto_audit: false           # 不自动点「审核」
 auto_voucher: false         # 不自动生成凭证
 auto_voucher_save: false    # 不自动保存凭证
 stop_on_error: true         # 出错立刻停
-screenshot_every_step: true # 每步截图存档
 ```
 
 脚本默认只做到**保存/暂存**就停，触发不可逆动作直接中断并提示改哪个开关。
 
-**放行顺序**：`--limit 1` 跑一条 → 你进金蝶逐项核对 → 再开 `auto_submit`/`auto_audit` → 小批量 5-10 条（含特例）→ 全量。
+**放行顺序**：`--limit 1` 跑一条 → 进金蝶逐项核对 → 再开 `auto_submit`/`auto_audit` → 小批量 → 全量。
+
+### ★★ 红线：凭证一律不删
+
+凭证是「单据→专票→凭证」的终态与唯一账务留痕，金蝶无回收站，删除不可逆。
+代码级硬拦截在 `src/common.py` 的 `Guard.FORBIDDEN` 和 `skill/scripts/kd_guard.py`，**与任何 config 开关、`--yes` 都无关，永远抛错**。
+要改凭证走「凭证 - 修改」页；要留痕不进账走**作废**。
 
 ---
 
-## 已确定的口径
+## 关键口径（已实测）
 
-| 项 | 口径 | 确认时间 |
-|---|---|---|
-| 开票方式 | **手工** —— 票在电子税务局开好，金蝶事后补录，不填发票号 | 第2轮 |
-| 发票分录 | **合并** —— 同组应收单合并生成 1 张发票单据 | 第2轮 |
-| 接口 | **WebAPI 未开放** → 浏览器自动化 | 第2轮 |
-| 出库单筛选 | **按账务日期区间**（字段 `FDate1`）上月26~当月25，**不按单号** | 第8轮 |
-↑ 演示期口径。正式投产（每月初处理上月账）改回 `上月最后一天`。
-| 明细行粒度 | **每个物料一行**，出库单下推环节不合并 | 第9轮 |
+| 项 | 口径 |
+|---|---|
+| 开票方式 | 手工（票在电子税务局开好，金蝶事后补录，不填发票号） |
+| 发票分录 | 合并（同组应收单合并生成 1 张发票） |
+| 接口 | WebAPI 未开放 → 浏览器自动化（接管已登录 Chrome） |
+| 出库单筛选 | 按账务日期区间（`FDate1`）上月26~当月25，不按单号 |
+| 明细行粒度 | 每个物料一行，合并在「应收单→下推发票」这步做 |
+| 复核人 | 姚玉平（专票必填项，kdcombo） |
+| 改业务日期 | 只写 `FDATE`，`FENDDATE_H` 到期日自动联动 |
 
-### ★ 两个实测的省事发现
+---
 
-1. **改业务日期会自动联动到期日** —— 只需写 `FDATE`，`FENDDATE_H` 会跟着变，不用单独设
-2. **开票人不用填** —— 发票的 `FDRAWER` 会自动取登录用户（蒋一天），脚本检测同值就跳过
-3. **发票的价税合计字段跟应收单不同** —— 发票 `FALLAMOUNTFOR`，应收单 `FALLAMOUNTFOR_D`
+## 历史经验沉淀（避坑）
 
-### ⚠️ 还没验证的关键点
-
-**全选 599 行（跨多张出库单、多个客户）下推，会生成几张应收单？**
-出库单下推应收单通常按**客户**分单（同客户合并一张，不同客户分开），
-但这台账套的实际规则没验证过 —— 之前只试了 1 行。
-**这决定了后面「一组」的定义，必须实测确认。**
-
-### ★★ 分录合并藏在「转换规则」下拉里（2026-09-18 实测）
-
-点「下推」弹出「选择单据」对话框后：
-
-```
-radio 选「销售增值税专用发票」(IV_SALESIC)
-        ↓
-「转换规则」下拉自动刷新出 2 项：
-    应收单 - 销售专用发票 - 分录合并      ← 要这个（默认不是它）
-    应收单 - 销售专用发票 - 分录不合并    ← 默认
-        ↓
-点确定
-```
-
-⚠️ **下拉列表只活在「同一次脚本调用」里**，分两次调用（先点下拉、下次再选项）
-第二次时列表已关闭，会静默用默认的「不合并」生成单据。
-→ `push_to_invoice()` 内部已改成**单 JS 全流程**（点下拉→选项→确定一次做完），
-但这个合并分支还没真实跑通过，下轮需验证。
-
-待确认：应收单**立账类型**（业务应收 / 暂估应收）、凭证**摘要规则样例**。
+- 详细静默失败清单（SF-01~SF-56）：`skill/references/silent-failures.md`
+- 界面结构现场记录：`docs/界面结构速查.md`
+- 页签选择器**唯一真相源**：`src/kd_tab_sel.py`（禁止在别处手写 `ul.kdMainTabsHeaderExtend`）
+- 页签配额上限 15：列表页替换式不占配额，表单孤儿页累加，`ctl.remove()` 才能释放，点 logo 回主页不能清零
+- 凡写必回读：写动作不抛异常 ≠ 值进去了，判据以**查询回读**为准

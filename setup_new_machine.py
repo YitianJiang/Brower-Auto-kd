@@ -17,11 +17,25 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SKILL_SRC = ROOT / "skill"
 SKILL_DST = Path.home() / ".workbuddy" / "skills" / "kingdee-k3cloud-browser-rpa"
+
+# 仓库本地的 Python 目录（自动安装时用，不污染系统）
+PY_DIR = ROOT / ".python"
+PY_EXE = PY_DIR / "python.exe"
+
+# 要安装的 Python 版本与下载源（Windows x64 安装器，走国内镜像更快）
+PY_VERSION = "3.12.8"
+PY_DOWNLOAD_URLS = [
+    # 华为云镜像（国内直连快）
+    f"https://mirrors.huaweicloud.com/python/{PY_VERSION}/python-{PY_VERSION}-amd64.exe",
+    # 官方源兜底
+    f"https://www.python.org/ftp/python/{PY_VERSION}/python-{PY_VERSION}-amd64.exe",
+]
 
 
 def log(tag, msg):
@@ -35,7 +49,10 @@ def step(n, title):
 
 
 def find_python():
-    """找一个能用的 python 解释器，优先 WorkBuddy 托管的。"""
+    """找一个能用的 python 解释器，优先级：仓库本地 > WorkBuddy 托管 > 系统。"""
+    # 0) 仓库本地的 .python（上次自动装过）
+    if PY_EXE.exists():
+        return str(PY_EXE)
     # 1) WorkBuddy 托管的 python（Windows 常见路径）
     managed = [
         Path.home() / ".workbuddy" / "binaries" / "python" / "versions",
@@ -54,6 +71,70 @@ def find_python():
         except Exception:
             continue
     return None
+
+
+def _download(url, dest, timeout=120):
+    """下载文件，带进度提示。返回是否成功。"""
+    print(f"  下载 {url}")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "kd-rpa-setup"})
+        with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
+            total = int(r.headers.get("Content-Length", 0))
+            done = 0
+            while True:
+                chunk = r.read(1024 * 256)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                if total:
+                    pct = done * 100 // total
+                    print(f"\r  {pct}% ({done // 1024 // 1024}MB / {total // 1024 // 1024}MB)", end="", flush=True)
+            print()
+        return True
+    except Exception as e:
+        print(f"\n  下载失败：{e}")
+        return False
+
+
+def install_python():
+    """无 Python 时，下载官方安装器静默装到仓库本地 .python/（不进 PATH、不污染系统）。"""
+    step(0, "未检测到 Python，自动下载并安装到仓库本地 .python/")
+    installer = ROOT / "python_installer.exe"
+    ok = False
+    for url in PY_DOWNLOAD_URLS:
+        if _download(url, installer):
+            ok = True
+            break
+        log("提示", "换下一个源重试...")
+    if not ok:
+        log("错误", "Python 安装包下载失败。请手动安装 Python 3.10+ 并勾选 Add to PATH 后重跑。")
+        return None
+
+    log("提示", f"静默安装 Python {PY_VERSION} 到 {PY_DIR}（约 1~2 分钟，请稍候）...")
+    # 静默安装：/quiet 无界面；TargetDir 装到仓库本地；Include_pip 带 pip
+    cmd = [
+        str(installer),
+        "/quiet", "InstallAllUsers=0",
+        f"TargetDir={PY_DIR}",
+        "Include_pip=1", "Include_test=0",
+        "PrependPath=0", "Shortcuts=0",
+    ]
+    r = subprocess.run(cmd, capture_output=True)
+    try:
+        installer.unlink()  # 删掉安装包
+    except Exception:
+        pass
+    if not PY_EXE.exists():
+        log("错误", f"安装后没找到 {PY_EXE}，请手动安装 Python 3.10+ 后重跑。")
+        return None
+    # 确保 pip 可用（个别精简安装没有 pip）
+    r = subprocess.run([str(PY_EXE), "-m", "pip", "--version"], capture_output=True)
+    if r.returncode != 0:
+        log("提示", "pip 不可用，尝试 ensurepip 初始化...")
+        subprocess.run([str(PY_EXE), "-m", "ensurepip", "--upgrade"], capture_output=True)
+    log("完成", f"Python 已装到 {PY_DIR}")
+    return str(PY_EXE)
 
 
 def run(cmd, desc=""):
@@ -147,8 +228,10 @@ def main():
 
     py = find_python()
     if not py:
-        log("错误", "没找到可用的 Python。请先安装 Python 3.10+，或")
-        log("错误", "确认 WorkBuddy 托管的 python 在 ~/.workbuddy/binaries/ 下。")
+        # 没 Python → 自动下载安装到仓库本地 .python/
+        py = install_python()
+    if not py:
+        log("错误", "仍没找到可用 Python。请手动安装 Python 3.10+ 并勾选 Add to PATH 后重跑本脚本。")
         input("\n按回车键退出...")
         return 1
     log("Python", py)
