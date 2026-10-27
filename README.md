@@ -112,6 +112,19 @@ kingdee-rpa/
 
 ---
 
+## 新机器一键部署
+
+换机器 / 新环境，clone 下来后**双击 `新机器一键部署.bat`**（或跑 `python setup_new_machine.py --all`）即可，自动完成：
+
+1. 装依赖（playwright / openpyxl / PyYAML + Chromium 内核）
+2. 补 `config.yaml`（从 `config.example.yaml` 复制）
+3. 装 skill 包（拷到 `~/.workbuddy/skills/`，WorkBuddy 自动加载）
+4. 启动调试浏览器（独立 Chrome，端口 9222）
+5. 开跑前自检（`--precheck`）
+
+装完只需手动做两件事（换机器必然要做）：① 打开 `config.yaml` 填 `base_url`（金蝶地址）；
+② 在弹出来的浏览器里登录金蝶。之后即可正常跑批。
+
 ## 命令速查
 
 ```bash
