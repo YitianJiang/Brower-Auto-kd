@@ -447,6 +447,14 @@ def step_invoice(ui, args, ar_no):
         ui.page.wait_for_timeout(800)
     ui.open_receivable_list()
     ui.clear_selection()
+    # ★ 2026-10-27 修复：应收单列表是虚拟滚动（total 可能上千行、分页 200 行/页），
+    #   --ar-no 复用的目标单号大概率不在第一页 → select_rows 扫不到会抛「找不到可见网格」。
+    #   先按单据编号过滤成只这一张，让它排到第一页再勾。
+    try:
+        n_f = ui.set_bill_no_filter([ar_no], field="FBillNo", verify=True)
+        log.info(f"按单号过滤 {ar_no} → 列表 {n_f} 行")
+    except Exception as e:  # noqa: BLE001
+        log.warn(f"按单号过滤失败（{str(e)[:100]}），退回直接勾选（可能翻不到页）")
     n = ui.select_rows([ar_no])
     log.info(f"应收单列表勾选 {ar_no} → {n} 张")
     ui.push_to_invoice(merge=merge)
