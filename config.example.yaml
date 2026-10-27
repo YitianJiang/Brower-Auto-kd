@@ -12,7 +12,7 @@ browser:
 
 kingdee:
   # 金蝶云星空地址（登录后填入，例如 http://erp.xxx.com/k3cloud/html5/index.aspx）
-  base_url: ""
+  base_url: "https://tlym.ik3cloud.com/k3cloud"
   # 账套 / 数据中心（登录页选择，若脚本需自动登录才用，接管模式不需要）
   data_center: ""
   user: ""
