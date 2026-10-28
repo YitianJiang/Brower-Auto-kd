@@ -385,16 +385,16 @@ def step_receivable(ui, args, outstock_rows):
             #   安徽济丰出库单 119906.17，下推应收单明细却只有 49035.38（差 70870.79），
             #   旧代码这里只打日志不拦，后面 target 又对齐到苏州山鹰的错靶 → 错账落库。
             #   这里加「不依赖命令行 target」的金额一致性硬校验：
-            #   来源出库单价税合计 必须 ≈ 应收单明细价税合计（容差 0.5 元，吸收四舍五入）。
+            #   来源出库单价税合计 必须 ≈ 应收单明细价税合计（容差 0.1 元，吸收四舍五入）。
             #   差多了 = 下推漏行/错单，**直接停，不保存**（宁可挂起，不推错账）。
-            if abs(base_amt - ob) > to_d("0.5"):
+            if abs(base_amt - ob) > to_d("0.1"):
                 log.err(f"金额核对失败：来源出库单价税合计 {_money(ob)} "
                         f"vs 应收单明细 {_money(base_amt)}，差 {_money(base_amt - ob)}")
                 log.err("停止：下推后应收单金额与来源出库单严重不符（可能漏行/错单），"
                         "不保存、不下推。请人工核对后重跑。")
                 raise RuntimeError(
                     f"应收单金额核对不通过：出库单 {ob:.2f} vs 应收单 {base_amt:.2f} "
-                    f"（差 {base_amt - ob:+.2f} > 0.5 容差）")
+                    f"（差 {base_amt - ob:+.2f} > 0.1 容差）")
 
     # ---- 折扣分摊 ----
     if args.discount is not None:
