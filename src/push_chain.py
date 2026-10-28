@@ -321,9 +321,18 @@ def filter_outstock(ui, args):
     if args.customer:
         custs = {str(r.get("FCUSTOMERID_FNAME") or "") for r in rows}
         if custs != {args.customer}:
-            log.warn(f"客户核对：筛选结果里的客户是 {custs}，与 --customer {args.customer!r} 不完全一致")
-        else:
-            log.ok(f"客户核对一致：{args.customer}")
+            # ★★ 2026-10-28 硬拦截（苏州山鹰错账根因）：以前这里只 warn 不拦，
+            #   --customer 和 --bill-nos 错配时（customer 写苏州山鹰、bill-no 却是
+            #   安徽济丰的 0129），金额被 target 强制对齐、客户跟着出库单走，
+            #   结果生成了「客户=安徽济丰、金额=苏州山鹰」的错账应收单。
+            #   ⇒ 改成 SystemExit 硬停，客户对不上绝不往下推。
+            shot(ui.page, SHOT_DIR, "customer_mismatch", log)
+            log.err(f"客户核对失败：筛选结果客户是 {sorted(custs)}，"
+                    f"与 --customer {args.customer!r} 不一致")
+            log.err("停止：--customer 与 --bill-nos/日期筛出的单据客户不符，"
+                    "可能单号写错。请核对后重跑（宁可挂起，不推错账）。")
+            raise SystemExit(4)
+        log.ok(f"客户核对一致：{args.customer}")
 
     log.info(f"清空选中前，当前已选 {ui.selected_count()} 行")
     ui.clear_selection()
