@@ -115,6 +115,16 @@ def shot(page, shot_dir: Path, tag: str, logger=None, full=False, timeout_ms=500
         单张调试、需要取证时再摘掉这个变量。
     """
     import os as _os
+    # ★★ 2026-10-28 默认禁用截图（根治「又去截图卡数分钟」）
+    #   历史坑：KD_NO_SHOT=1 是各 run_batch*.py 入口自己在文件头 os.environ 设的，
+    #   单独跑 push_chain.py / push_return.py 时没有这层 → shot() 正常截图 →
+    #   CDP Page.captureScreenshot 等渲染器产帧 → 卡 9 分钟+（对正确性零贡献）。
+    #   改法：默认不开截图；只有显式 KD_SHOT=1 才截（单张调试/取证时用）。
+    _force = _os.environ.get("KD_SHOT", "").strip() in ("1", "true", "yes", "on")
+    if not _force:
+        if logger:
+            logger.info(f"截图已跳过（默认关闭，KD_SHOT=1 可强制开启）：{tag}")
+        return None
     if _os.environ.get("KD_NO_SHOT", "").strip() in ("1", "true", "yes", "on"):
         if logger:
             logger.info(f"截图已禁用（KD_NO_SHOT=1）：{tag}")
