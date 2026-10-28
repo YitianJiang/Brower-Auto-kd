@@ -376,25 +376,49 @@ def step_receivable(ui, args, outstock_rows):
 
     base_amt = sum(r["all"] for r in detail)
     if args.customer and outstock_rows:
-        ob = sum(to_d(r.get("FALLAMOUNTFOR") or r.get("FALLAMOUNTFOR_D") or 0)
-                 for r in outstock_rows)
-        if ob:
-            log.info(f"来源出库单价税合计 {_money(ob)} vs 应收单明细 {_money(base_amt)}"
-                     f"（差 {_money(base_amt - ob)}）")
-            # ★★ 2026-10-28 硬护栏（安徽济丰错账根因 2/2）：
-            #   安徽济丰出库单 119906.17，下推应收单明细却只有 49035.38（差 70870.79），
-            #   旧代码这里只打日志不拦，后面 target 又对齐到苏州山鹰的错靶 → 错账落库。
-            #   这里加「不依赖命令行 target」的金额一致性硬校验：
-            #   来源出库单价税合计 必须 ≈ 应收单明细价税合计（容差 0.1 元，吸收四舍五入）。
-            #   差多了 = 下推漏行/错单，**直接停，不保存**（宁可挂起，不推错账）。
-            if abs(base_amt - ob) > to_d("0.1"):
-                log.err(f"金额核对失败：来源出库单价税合计 {_money(ob)} "
-                        f"vs 应收单明细 {_money(base_amt)}，差 {_money(base_amt - ob)}")
-                log.err("停止：下推后应收单金额与来源出库单严重不符（可能漏行/错单），"
-                        "不保存、不下推。请人工核对后重跑。")
-                raise RuntimeError(
-                    f"应收单金额核对不通过：出库单 {ob:.2f} vs 应收单 {base_amt:.2f} "
-                    f"（差 {base_amt - ob:+.2f} > 0.1 容差）")
+        # ★★ 2026-10-28 金额一致性硬护栏（安徽济丰错账根因 2/2）：
+        #   安徽济丰出库单 119906.17，下推应收单明细却只有 49035.38（差 70870.79），
+        #   旧代码这里只打日志不拦 → 错账落库。
+        #
+        #   「来源出库单价税合计」权威口径 = 服务端 SAL_OUTSTOCK.FBillAllAmount（单头）。
+        #   ⚠️ 不能用界面列表的 FALLAMOUNTFOR / FALLAMOUNTFOR_D：
+        #      - docs/界面结构速查.md 记「SAL_OUTSTOCK.FALLAMOUNTFOR 不存在」；
+        #      - grid_all_rows() 的出库单列表是明细级扁平表，dataSource 里根本没有
+        #        价税合计列（实测字段仅 FDATE/FBILLNO/FCUSTOMERID_FNAME/物料等）。
+        #   所以从 outstock_rows 提取去重单据号，逐张查 FBillAllAmount 再求和。
+        try:
+            from kdquery import KdQuery
+            _kq = KdQuery(ui.page)
+            src_nos = sorted({str(r.get("FBILLNO") or "").strip()
+                              for r in outstock_rows if r.get("FBILLNO")})
+            ob = to_d(0)
+            missing_src = []
+            for _no in src_nos:
+                _sr = _kq.rows("SAL_OUTSTOCK", "FBillNo,FBillAllAmount",
+                               f"FBillNo = '{_no}'", top=5)
+                if _sr and _sr[0].get("FBillAllAmount") is not None:
+                    ob += to_d(_sr[0].get("FBillAllAmount") or 0)
+                else:
+                    missing_src.append(_no)
+            if missing_src:
+                log.warn(f"服务端查不到这些出库单的价税合计（跳过该部分核对）：{missing_src}")
+            if ob:
+                log.info(f"来源出库单价税合计 {_money(ob)} vs 应收单明细 {_money(base_amt)}"
+                         f"（差 {_money(base_amt - ob)}）")
+                # ★ 容差 = 0：正常下推应收单明细价税合计应**精确等于**来源出库单价税合计
+                #   （明细 1:1 继承，四舍五入已在源头做过）。有差 = 漏行/错单，直接停。
+                if base_amt != ob:
+                    log.err(f"金额核对失败：来源出库单价税合计 {_money(ob)} "
+                            f"vs 应收单明细 {_money(base_amt)}，差 {_money(base_amt - ob)}")
+                    log.err("停止：下推后应收单金额与来源出库单不一致（可能漏行/错单），"
+                            "不保存、不下推。请人工核对后重跑。")
+                    raise RuntimeError(
+                        f"应收单金额核对不通过：出库单 {ob:.2f} vs 应收单 {base_amt:.2f} "
+                        f"（差 {base_amt - ob:+.2f}）")
+        except RuntimeError:
+            raise
+        except Exception as _e:  # noqa: BLE001
+            log.warn(f"金额核对服务端查询异常，本次跳过核对：{str(_e)[:120]}")
 
     # ---- 折扣分摊 ----
     if args.discount is not None:
