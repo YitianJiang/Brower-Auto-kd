@@ -299,6 +299,24 @@ class KingdeeUI:
         """
         want = path or self.MENU_PATH_HINT.get(name)
 
+        # ★★ 2026-10-29（第二次复发后补）：**主动配额闸门**。
+        #   历史教训：过去只在 `run_batch` 的「每家开始前 / 成功后」做 deep_clean，
+        #   而 `push_chain` 内部那 5 个阶段（应收单→专票→凭证→摘要）中途**从不读配额**；
+        #   日志又只打**可见标签数** `tabs()`（实测恒为 2），真实配额 `items()`
+        #   从来没人看见 ⇒ 排查时所有人都误判成"配额没涨"。
+        #   ⇒ 现在每次开功能页**之前**先读真实配额，超软线就先 ctl.remove 释放，
+        #     并且把配额写进日志（以后一眼可见，不必再靠猜）。
+        #   注：硬上限 15，其中**常驻 2 个零宽幽灵 li**，真实可用约 13 ⇒ 软线取 10。
+        try:
+            _q = self.tab_quota()
+            if _q >= 0:
+                self.log.info(f"页签配额 {_q}/15（开「{name}」前）")
+                if _q >= 10:
+                    self.log.warn(f"页签配额 {_q} ≥ 10 软线 → 先释放再开页")
+                    self.release_tab_quota(keep_names=("销售出库单列表", name), force=True)
+        except Exception as e:  # noqa: BLE001
+            self.log.warn(f"配额闸门检查失败（继续）：{str(e)[:60]}")
+
         # ★ 2026-09-22 补：目标列表**已经开着**就直接切过去，别再走搜索。
         #   实测踩坑：页面上开着「应收单 - 新增」时，它的 .kd-form-collapse-container
         #   会浮在最上层拦截搜索条目的点击（报错 `... intercepts pointer events`），
@@ -527,7 +545,14 @@ class KingdeeUI:
         #   标签数记下来，才能定位标签是在哪一步涨起来的。
         try:
             ts = self.tabs()
-            self.log.info(f"标签数 = {len(ts)} {[t['text'][:14] for t in ts]}")
+            # ★ 2026-10-29：**同时打真实配额**。只打 tabs() 会骗人 ——
+            #   可见标签恒为 2，而 items() 含幽灵 li 才是金蝶判「上限15」的依据。
+            try:
+                _q2 = self.tab_quota()
+            except Exception:  # noqa: BLE001
+                _q2 = -1
+            self.log.info(f"标签数 = {len(ts)} / 配额 = {_q2} "
+                          f"{[t['text'][:14] for t in ts]}")
         except Exception as e:  # noqa: BLE001
             self.log.warn(f"读标签数失败：{str(e)[:60]}")
             ts = []
