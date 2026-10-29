@@ -3683,10 +3683,31 @@ class KingdeeUI:
         return self.expect_tab("业务凭证列表")
 
     def open_gl_voucher_for_edit(self):
-        """业务凭证列表 → 选中行 →「查看总账凭证」（→「凭证 - 修改」，改摘要处）"""
-        self._reset_selection_and_pick_first()
-        self.click_menu(self.GLVCH_BTN, timeout_ms=6000)
-        return self.expect_tab("凭证 - 修改")
+        """业务凭证列表 → 选中行 →「查看总账凭证」（→「凭证 - 修改」，改摘要处）
+
+        ★ 2026-10-29（衢州驰星摘要写失败）：点「查看总账凭证」后 `凭证 - 修改` **没打开**，
+          旧代码直接 `expect_tab` 超时报 `等标签 '凭证 - 修改' 超时` —— 摘要写不进去。
+          真因还是 SF-61 那一类：页签配额满 15 时点按钮既不生效也不报错。
+          这里加自愈：超时 → 关「上限15」弹窗 + `release_tab_quota()` → 重新选行再点，≤2 次。
+        """
+        last = None
+        for att in range(1, 4):
+            self._reset_selection_and_pick_first()
+            self.click_menu(self.GLVCH_BTN, timeout_ms=6000)
+            try:
+                return self.expect_tab("凭证 - 修改", timeout_ms=15000)
+            except RuntimeError as e:
+                last = e
+                if att >= 3:
+                    break
+                self.log.warn(f"「凭证 - 修改」未打开（第 {att} 次）：{str(e)[:80]} "
+                              f"→ 关弹窗+释放页签配额后重试")
+                self.dismiss_quota_dialog()
+                self.release_tab_quota(
+                    keep_names=("销售出库单列表", "业务凭证列表", "凭证生成报告列表"),
+                    force=True)
+                self.page.wait_for_timeout(1200)
+        raise last
 
     def read_voucher_entries(self):
         """读「凭证 - 修改」页的分录行，返回 [{FENTRYSEQ, FEXPLANATION, ..., __rowid__, __editable__}]"""
