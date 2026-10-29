@@ -121,8 +121,12 @@ pages = br.contexts[0].pages      # 取第一个 page（金蝶是 SPA，全程�
 文本框/日期：  -{FIELD}-EDITOR_c      ← 注意小写 _c
 下拉(combo)：  -{FIELD}-EDITOR        ← 没有 _c（如 F_PAEZ_COMBO）
 ```
-`FIELD` 是金蝶内部字段名：`FBILLNO / FDATE(业务日期) / FDate1(账务日期，列表过滤用) /
+`FIELD` 是金蝶内部字段名：`FBILLNO / FDATE(业务日期/「日期」) / FDate1(账务日期) /
 FINVOICEDATE / FDRAWER(开票人) / FPAYEE(收款人) / F_PAEZ_COMBO(复核人)`。
+
+> ★ 出库单**筛选口径 = `FDate`（「日期」，即单据日期）**，不是 `FDate1`（账务日期）。
+> 用户 2026-10-29 确认；Excel「下推出库单起始/结束日期」两列就是这个口径。
+> `set_date_filter(field=None)` 默认是 `FDate1`，调用方必须显式传 `field="FDate"`。
 
 ### 3. ⚠️ 必须先叠可见性过滤
 同一 document 里**同时挂着多个 pageId 的 DOM**（开过的页面都留着）。所有定位都要：

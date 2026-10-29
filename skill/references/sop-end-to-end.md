@@ -22,7 +22,7 @@
 **动作序列**（`KingdeeUI`，详见 SKILL.md §五 / §五之八）：
 ```
 open_menu_by_search("销售出库单列表")          # 重名要用菜单路径消歧（供应链>销售管理>出货处理）
-set_bill_no_filter([单号...])                 # 或按 FDate1 日期区间
+set_bill_no_filter([单号...])                 # 或按 FDate（单据日期）日期区间
 clear_selection() if selected_count() else -  # 表头复选框是三态语义，先归零
 select_all_rows()                             # 真实鼠标逐行勾
 click_menu("下推") → 选目标「应收单」 → FBTNOK_c
