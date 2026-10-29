@@ -530,6 +530,54 @@ class KingdeeUI:
             self.log.info(f"标签数 = {len(ts)} {[t['text'][:14] for t in ts]}")
         except Exception as e:  # noqa: BLE001
             self.log.warn(f"读标签数失败：{str(e)[:60]}")
+            ts = []
+
+        # ★★ 2026-10-29 根治（河南华洋事故）：**「点了」≠「开了」**。
+        #   实测（2026-10-29 16:54:42 华洋）：真实鼠标点了「YSDLB应收单列表」条目，
+        #   紧接着 `标签数 = 1 ['销售出库单列表']` —— 应收单列表**根本没打开**。
+        #   旧代码不看这个、直接 return True，于是后面在**出库单列表的 grid** 上
+        #   按 AR 单号过滤（当然 0 行）→ 报「找不到可见的列表网格」，
+        #   看着像勾选/虚拟滚动问题，实际是页面没开。同类还有：
+        #   「超出页签上限15个」模态框挡在最上层时，点条目不生效但也不报错。
+        #   ⇒ 开完必须校验目标页签真的出现；没出现 → 关弹窗 + 清浮层后重试 ≤2 次；
+        #     仍不出现 → **直接抛错**，绝不在旧页面上继续操作（宁可停，不推错账）。
+        t0 = time.time()
+        while (time.time() - t0) * 1000 < 6000:
+            if any(name in (t.get("text") or "") for t in ts):
+                break
+            self.page.wait_for_timeout(500)
+            try:
+                ts = self.tabs()
+            except Exception:  # noqa: BLE001
+                ts = ts or []
+        if not any(name in (t.get("text") or "") for t in ts):
+            depth = getattr(self, "_open_retry", 0)
+            if depth < 2:
+                self.dismiss_quota_dialog()
+                # ★ 关键：先真正释放配额（幽灵 li / 残留表单页），否则重试也是点空。
+                #   保留工作锚点「销售出库单列表」与目标页。
+                self.release_tab_quota(keep_names=("销售出库单列表", name), force=True)
+                try:
+                    self.close_stray_windows(max_iter=2)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    self.dismiss_floating_hints()
+                except Exception:  # noqa: BLE001
+                    pass
+                self.log.warn(f"打开 {name!r} 未生效（标签数={len(ts)}）→ "
+                              f"清弹窗后第 {depth + 1} 次重试")
+                self._open_retry = depth + 1
+                try:
+                    return self.open_menu_by_search(name, path=path,
+                                                   wait_ms=wait_ms, tries=1)
+                finally:
+                    self._open_retry = 0
+            raise RuntimeError(
+                f"打开功能页 {name!r} 失败：点击后标签栏没有出现该页"
+                f"（当前 {[t.get('text', '')[:14] for t in ts]}）。"
+                f"常见原因：① 页签配额满 15（弹窗被关但仍未释放，需 ctl.remove 摘孤儿）"
+                f"② 登录态失效 ③ 弹窗/浮层挡住。已停止，不在旧页面上继续操作。")
         return True
 
     # ---------- 列表操作（已验证） ----------
@@ -3329,6 +3377,78 @@ class KingdeeUI:
             self.log.warn(f"kendomainTabControl 摘标签失败：{type(e).__name__}: {str(e)[:80]}")
             return False
 
+    # ★★ 2026-10-29（河南华洋事故后补）：**页签配额自愈**。
+    #   配额真值 = 主标签栏控件 `kendomainTabControl.items().length`（含零宽幽灵 li），
+    #   不是 `tabs()` 数的可见标签数 —— 实测 items()=4 时 tabs()=2。
+    #   攒到 15 时金蝶弹「超出了参数控制打开页签数的上限15个」，**之后任何功能页都打不开**，
+    #   而且点搜索条目既不报错也不生效（正是华洋那单的现场）。
+    #   唯一能真正释放配额的手段 = `ctl.remove($(li))`（点 logo 回主页不清零，实测 4→4）。
+    #   过去这段逻辑只在 run_batch 壳脚本里（deep_clean），单跑 push_chain 时没有 ⇒ 复现。
+    JS_QUOTA_COUNT = """() => {
+        const $ = window.jQuery;
+        const strip = document.querySelector('__MAIN_TAB__');
+        if (!strip) return -1;
+        const ctl = $(strip).closest('.k-widget').data('__WIDGET_KEY__');
+        if (!ctl) return -2;
+        try { return ctl.items().length; } catch (e) { return -3; }
+    }"""
+
+    def tab_quota(self):
+        """读金蝶真实页签配额 items().length（含幽灵 li）。读不到返回 -1。"""
+        js = (self.JS_QUOTA_COUNT
+              .replace("__MAIN_TAB__", MAIN_TAB_SELECTOR)
+              .replace("__WIDGET_KEY__", WIDGET_KEY))
+        try:
+            return int(self.page.evaluate(js))
+        except Exception as e:  # noqa: BLE001
+            self.log.warn(f"读页签配额失败：{type(e).__name__}: {str(e)[:60]}")
+            return -1
+
+    def release_tab_quota(self, keep_names=(), force=False, max_free=100):
+        """配额接近上限时用 `ctl.remove()` 摘掉「幽灵 li / 残留表单页」，真正释放配额。
+
+        keep_names: 必须保留的标签（通常是工作锚点，如「销售出库单列表」）
+        保留规则：名字命中 keep_names 的、以及所有以「列表」结尾的功能页
+                  （列表页重新打开只要几秒，且里面没有未保存数据）。
+        返回 (释放前配额, 释放后配额, 摘除个数)。"""
+        js = """(args) => {
+            const [keep, maxFree] = args;
+            const $ = window.jQuery;
+            const strip = document.querySelector('__MAIN_TAB__');
+            if (!strip) return [-1, -1, 0];
+            const ctl = $(strip).closest('.k-widget').data('__WIDGET_KEY__');
+            if (!ctl || typeof ctl.remove !== 'function') return [-2, -2, 0];
+            const arr = ctl.items();
+            const before = arr.length;
+            let removed = 0;
+            for (let i = arr.length - 1; i >= 0; i--) {
+                if (removed >= maxFree) break;
+                const li = arr[i];
+                const txt = (li.innerText || '').trim().replace(/\\s+/g, ' ');
+                const w = (li.getBoundingClientRect ? li.getBoundingClientRect().width : 0);
+                const ghost = !txt;                       // 零宽幽灵 li
+                const keepIt = keep.some(k => k && txt.includes(k));
+                const isList = txt.endsWith('列表');
+                if (!ghost && (keepIt || isList)) continue;
+                try { ctl.remove($(li)); removed++; } catch (e) {}
+            }
+            let after = before;
+            try { after = ctl.items().length; } catch (e) {}
+            return [before, after, removed];
+        }"""
+        js = js.replace("__MAIN_TAB__", MAIN_TAB_SELECTOR).replace("__WIDGET_KEY__", WIDGET_KEY)
+        try:
+            before, after, removed = self.page.evaluate(js, [list(keep_names), max_free])
+        except Exception as e:  # noqa: BLE001
+            self.log.warn(f"释放页签配额失败：{type(e).__name__}: {str(e)[:60]}")
+            return -1, -1, 0
+        if removed:
+            self.page.wait_for_timeout(600)
+            self.log.warn(f"页签配额 {before} → {after}（摘除 {removed} 个幽灵/残留页）")
+        elif force:
+            self.log.warn(f"页签配额 {before}，无可摘除项（保留 {list(keep_names)}）")
+        return before, after, removed
+
     def dismiss_floating_hints(self):
         """
         隐藏**残留浮动提示条** —— 金蝶失败保存/校验后会留一条
@@ -3357,6 +3477,38 @@ class KingdeeUI:
         if n:
             self.log.warn(f"隐藏残留浮动提示条 {n} 个（会挡住右上角搜索结果/工具栏）")
         return n
+
+    # ★★ 2026-10-29（河南华洋事故后补）：金蝶「页签上限 15」这类模态框必须先关掉，
+    #   否则它会一直挡在页面上，之后所有的功能页都打不开（点搜索结果 = 点空）。
+    JS_DISMISS_QUOTA = """() => {
+        const vis = e => { const b = e.getBoundingClientRect();
+            return b.width > 0 && b.height > 0 && e.offsetParent !== null; };
+        const out = [];
+        Array.from(document.querySelectorAll('.k-window, .k-dialog, .kd-dialog'))
+            .filter(vis).forEach(w => {
+                const t = (w.innerText || '');
+                if (t.includes('金蝶提示') || t.includes('上限15个')
+                    || t.includes('不能打开当前功能页签') || t.includes('页签数')) {
+                    const btn = Array.from(w.querySelectorAll('a,button,span'))
+                        .find(b => vis(b) && (b.innerText || '').trim() === '确定');
+                    if (btn) { btn.click(); out.push(t.replace(/\\s+/g, ' ').slice(0, 60)); }
+                }
+            });
+        return out;
+    }"""
+
+    def dismiss_quota_dialog(self):
+        """点「确定」关掉「超出了参数控制打开页签数的上限15个」这类模态框。
+        返回被关掉的弹窗文案列表（空 = 没有这类弹窗）。"""
+        try:
+            out = eval_all_frames(self.page, self.JS_DISMISS_QUOTA) or []
+        except Exception as e:  # noqa: BLE001
+            self.log.warn(f"关页签上限弹窗异常：{str(e)[:60]}")
+            return []
+        if out:
+            self.page.wait_for_timeout(600)
+            self.log.warn(f"已点「确定」关掉提示框：{out}")
+        return out
 
     def close_stray_windows(self, max_iter=6):
         """

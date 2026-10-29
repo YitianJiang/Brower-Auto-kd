@@ -493,6 +493,19 @@ def step_invoice(ui, args, ar_no):
         log.info(f"打开「应收单列表」前先关掉占单标签：{closed}")
         ui.page.wait_for_timeout(800)
     ui.open_receivable_list()
+    # ★★ 2026-10-29（河南华洋事故）：**开页 ≠ 激活页**。
+    #   若当前激活的还是「销售出库单列表」，后面的「按单号过滤 AR…」会作用在
+    #   **出库单列表**上 → 0 行 → 后面报「找不到可见的列表网格」。
+    #   这里显式确认激活页，不是就切过去，切不过去直接停。
+    _cur = ui.active_tab() or ""
+    if "应收单列表" not in _cur:
+        log.warn(f"激活页不是应收单列表（当前 {_cur!r}）→ 强制切换")
+        ui.activate_tab("应收单列表", timeout_ms=8000)
+        ui.page.wait_for_timeout(1200)
+        _cur = ui.active_tab() or ""
+        if "应收单列表" not in _cur:
+            raise RuntimeError(
+                f"应收单列表未激活（当前 {_cur!r}），不能在错误页面上过滤/勾选，已停止")
     ui.clear_selection()
     # ★ 2026-10-27 修复：应收单列表是虚拟滚动（total 可能上千行、分页 200 行/页），
     #   --ar-no 复用的目标单号大概率不在第一页 → select_rows 扫不到会抛「找不到可见网格」。
@@ -584,6 +597,15 @@ def step_voucher(ui, inv_no):
     log.info(f"生成凭证前清占单标签：关掉 {closed}")
 
     ui.open_invoice_list()
+    # ★ 2026-10-29：同 step_invoice，开页 ≠ 激活页；在错误的列表上勾专票号会勾空。
+    _cur = ui.active_tab() or ""
+    if "销售增值税专用发票列表" not in _cur:
+        log.warn(f"激活页不是专票列表（当前 {_cur!r}）→ 强制切换")
+        ui.activate_tab("销售增值税专用发票列表", timeout_ms=8000)
+        ui.page.wait_for_timeout(1200)
+        _cur = ui.active_tab() or ""
+        if "销售增值税专用发票列表" not in _cur:
+            raise RuntimeError(f"专票列表未激活（当前 {_cur!r}），已停止（不在错误页面上勾单）")
     ui.clear_selection()
     if not inv_no:
         # ★ 不能退化到 select_all_rows()：专票列表里可能还有别的未审核/已审核单据，
