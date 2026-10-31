@@ -1669,6 +1669,60 @@ class KingdeeUI:
         self.choose_push_target("应收单")
         # ⚠️ 下推对话框的「确定」必须真实鼠标点（合成 click 无效，见 click_confirm）
         self.click_confirm(dialog_kw="整单转换")
+        self.check_transfer_netlock()
+
+    # ★ 2026-10-31（SF-65）：下推后可能先弹「单据转换网控提示」而不是目标单据页。
+    _NETLOCK_JS = """() => {
+        const vis = el => { const s = getComputedStyle(el);
+            return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0'; };
+        const ws = Array.from(document.querySelectorAll('.k-window')).filter(vis)
+            .filter(w => (w.innerText || '').includes('单据转换网控提示'));
+        if (!ws.length) return null;
+        const txt = ws.map(w => (w.innerText || '').replace(/\\s+/g, ' ').trim()).join(' || ');
+        return {n: txt};
+    }"""
+
+    _NETLOCK_CANCEL_JS = """() => {
+        const vis = el => { const s = getComputedStyle(el);
+            return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0'; };
+        const w = Array.from(document.querySelectorAll('.k-window')).filter(vis)
+            .find(x => (x.innerText || '').includes('单据转换网控提示'));
+        if (!w) return null;
+        const btn = w.querySelector('a[id$="-FCANCEL_c"]');
+        if (!btn) return null;
+        btn.scrollIntoView({block: 'center'});
+        const r = btn.getBoundingClientRect();
+        return {n: [r.x + r.width / 2, r.y + r.height / 2]};
+    }"""
+
+    def check_transfer_netlock(self, wait_ms=1500):
+        """下推后若弹「单据转换网控提示」——**点取消 + 抛错**，绝不允许「继续」。
+
+        ★ 2026-10-31 杰翙重推实测：7 张单里 `XSCKD-105-202610-0032` 被网控占用
+          （提示「蒋一天」使用业务单据 销售出库单 - 修改 冲突）。
+          该弹窗的「继续」按钮文案是「继续将过滤被网络控制冲突占据的单据，
+          转换携带剩余单据」——即**静默丢掉被占用的整张单**。
+          杰翙那次少 200kg / 2,400 元，正是这条路径（先丢单、再靠「金额对齐」抹平）。
+          脚本没有资格替人做这个选择：一律取消并抛错，等人释放网络控制后再跑。
+        """
+        self.page.wait_for_timeout(wait_ms)
+        r = eval_all_frames(self.page, self._NETLOCK_JS)
+        if not r:
+            return None
+        txt = r.get("n", "") if isinstance(r, dict) else str(r)
+        # 绝不点「继续」——只取消
+        box = eval_all_frames(self.page, self._NETLOCK_CANCEL_JS)
+        if isinstance(box, dict) and box.get("n"):
+            x, y = box["n"]
+            self.page.mouse.click(x, y)
+            self.page.wait_for_timeout(600)
+        self.log.err(f"下推被网控拦截：{txt[:300]}")
+        self.log.err("已点「取消」。禁点「继续」——它会静默丢弃被占用单据，"
+                     "只转换剩余部分（杰翙少 200kg/2,400 元就是这么来的）。")
+        raise RuntimeError(
+            "下推被单据转换网控拦截（有单据正被「修改」占用）。"
+            f"服务端原文：{txt[:200]}　"
+            "请先释放网络控制（关闭该单据的修改页，或系统管理→网络控制清除），再重跑本单。")
 
     def fill_receivable_fields(self, row):
         """补填应收单字段（立账类型等）—— 字段名未采集，用标签定位兜底"""
