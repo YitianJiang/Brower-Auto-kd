@@ -2,7 +2,7 @@
 """
 主流程编排
 ----------
-销售出库单 -> 应收单 -> 增值税专用发票(分录合并) -> 凭证(改摘要)
+销售出库单 -> 应收单 -> 增值税专用发票(分录不合并) -> 凭证(改摘要)
 
 用法：
     python src/run.py --plan      # 只解析 Excel，打印执行计划，不连浏览器、不碰金蝶
@@ -148,10 +148,10 @@ def process_group(ui, key, grp, log, results):
         ui.audit_bill()    # 受护栏控制
         # TODO(采集后填)：把生成的应收单号读回来写进 results
 
-    # ---- 步骤 2：应收单下推增值税专用发票（分录合并）----
+    # ---- 步骤 2：应收单下推增值税专用发票（★ 分录不合并，2026-11-01 定）----
     ui.open_receivable_list()
     ui.select_rows([])  # TODO：改为勾选上一步生成的应收单号
-    ui.push_to_invoice(merge=True)          # 已确认：分录合并
+    ui.push_to_invoice(merge=False)         # 不合并：票行数=应收单行数，便于逐行校验
     # 填这四项：开票人 / 复核人 / 业务日期 / 发票日期（发票号码不填）
     ui.backfill_invoice_info(
         drawer=grp[0].get(COL_DRAWER),

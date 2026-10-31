@@ -1887,11 +1887,12 @@ class KingdeeUI:
     RULE_MERGE = "应收单 - 销售专用发票 - 分录合并"
     RULE_NO_MERGE = "应收单 - 销售专用发票 - 分录不合并"
 
-    def push_to_invoice(self, merge=True, click_ok=True):
+    def push_to_invoice(self, merge=False, click_ok=True):
         """
         点「下推」→ 选「销售增值税专用发票」→ 在转换规则下拉选合并/不合并 → (可选)确定。
-        merge=True  -> 「应收单 - 销售专用发票 - 分录合并」（用户已确认用这个）
-        merge=False -> 「分录不合并」
+        merge=False -> 「分录不合并」（★ 默认，2026-11-01 起）：票行数 = 应收单行数，
+                       逐行原值搬运，三项金额天然精确相等，也能用行数硬卡漏行
+        merge=True  -> 「分录合并」：同物料多行会被汇总，行数不再对应、税额可能被重算
         click_ok=False 时停在对话框不点确定（先看结构用）
         """
         want = self.RULE_MERGE if merge else self.RULE_NO_MERGE

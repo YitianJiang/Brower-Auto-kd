@@ -17,11 +17,12 @@ python src/push_chain.py --customer 广源包装集团 \
     --biz-date 2026-09-30 --invoice-date 2026-09-30 \
     --step voucher --yes
 
-# ★ 不产生 -00000N 子单：下推专票时用「分录不合并」（专票行数 = 应收单行数）
-python src/push_chain.py ... --no-invoice-merge --yes
+# ★ 专票默认「分录不合并」（2026-11-01 起）：专票行数 = 应收单行数，逐行原值搬运，
+#   三项金额天然精确相等；不再需要 --no-invoice-merge（旧命令仍兼容，传了无副作用）
+python src/push_chain.py ...
 
 # ★ 对照实验：同一张已审核应收单，只重跑「下推专票」这一段（不建应收单）
-python src/push_chain.py --ar-no AR105-202609-0004 --step invoice --no-invoice-merge --yes
+python src/push_chain.py --ar-no AR105-202609-0004 --step invoice --yes
 
 参数速查
 --------
@@ -33,7 +34,7 @@ python src/push_chain.py --ar-no AR105-202609-0004 --step invoice --no-invoice-m
   --biz-date / --invoice-date    业务日期 / 发票日期（专票），如 2026-09-30
   --checker       复核人（默认取 config.rules.invoice_checker）
   --step          跑到哪一步为止：receivable | invoice | voucher(默认，全链)
-  --no-invoice-merge  下推专票用「分录不合并」（见 docs/广源应收单子单-原因分析.md）
+  --invoice-merge 用「分录合并」下推专票（**不建议**；默认不合并，故一般不用传任何参数）
   --ar-no         复用已有应收单号（跳过筛选/建单，只跑 invoice/voucher）
   --yes           放行不可逆动作（保存/提交/审核/生成凭证）
   --dry-run       只读不写：筛选 + 读明细 + 打印分摊结果，不点任何保存/下推
@@ -87,9 +88,16 @@ def parse_args():
     ap.add_argument("--checker", default="", help="复核人")
     ap.add_argument("--step", choices=["receivable", "invoice", "voucher"],
                     default="voucher", help="跑到哪一步为止")
+    # ★ 2026-11-01 默认改为「不合并」：合并会把同物料多行合成一行，
+    #   ① 专票行数 ≠ 应收单行数 → 「行数对得上」这条硬校验用不了；
+    #   ② 合并后金蝶可能按汇总金额重算税额 → 不含税/税额各差几分；
+    #   ③ 出了差要判断是「漏行」还是「合并」，多一层歧义。
+    #   不合并 = 逐行原值搬运，三项金额天然精确相等，校验也是最硬的。
+    ap.add_argument("--invoice-merge", action="store_true",
+                    help="用「分录合并」下推专票（**不建议**：行数不再一一对应、税额可能被重算）。"
+                         "默认不合并。")
     ap.add_argument("--no-invoice-merge", action="store_true",
-                    help="★ 下推专票时用「分录不合并」：专票 46 行与应收单逐行对应，"
-                         "舍入口径一致 → 不产生 -00000N 子单（代价：专票行数 = 应收单行数）")
+                    help="（兼容旧命令，已是默认行为，传了也无副作用）")
     ap.add_argument("--ar-no", default="",
                     help="复用已有应收单号（只跑 --step invoice/voucher 时用，跳过出库单筛选与建单）")
     ap.add_argument("--yes", action="store_true", help="放行不可逆动作")
@@ -666,7 +674,7 @@ def _verify_invoice_vs_ar(ui, ar_no, detail, merge, log):
       ① 不含税：专票 Σ FNOTAXAMOUNT   ==  应收 Σ FNOTAXAMOUNTFOR_D
       ② 税　额：专票 Σ FDETAILTAXAMOUNT ==  应收 Σ FTAXAMOUNTFOR_D
       ③ 价税合计：专票 Σ FALLAMOUNT     ==  应收 Σ FALLAMOUNTFOR_D
-      ④ 不合并（--no-invoice-merge）时行数应 == 应收明细行数；不等只 warn
+      ④ 不合并（默认）时行数应 == 应收明细行数；不等只 warn
          （0 元/赠品行可能被金蝶过滤，金额已由 ①②③ 兜住）。
 
     ⚠️ 三项都卡，不能只卡价税合计：两条金额只要「不含税少 x、税额多 x」就能凑出
@@ -751,8 +759,11 @@ def _verify_invoice_saved(ui, inv_no, ar_no, log):
 def step_invoice(ui, args, ar_no):
     if not ar_no:
         raise RuntimeError("没有应收单号，无法下推专票（请用 --step receivable 先做，或 --ar-no 指定）")
-    merge = not args.no_invoice_merge
-    log.info(f"★ 下推专票转换规则 = {'分录合并' if merge else '分录不合并（逐行对应，不产生子单）'}")
+    merge = bool(args.invoice_merge)      # 2026-11-01 起默认不合并，见 build_args 注释
+    log.info(f"★ 下推专票转换规则 = {'分录合并（不推荐）' if merge else '分录不合并（逐行对应，不产生子单）'}")
+    if merge:
+        log.warn("分录合并会把同物料多行汇总：专票行数不再与应收单一一对应，"
+                 "税额也可能被重算（三项精确校验可能拦下）。除非有明确理由，否则去掉 --invoice-merge。")
     # ★ 2026-10-03 修复：先把「应收单 - 新增」这类占单标签关掉再打开应收单列表。
     #   否则那张单的 `.kd-form-collapse-container` 会盖在功能搜索面板上面，
     #   点搜索结果时被拦成 `intercepts pointer events` 超时（SF-32 的变体）——
