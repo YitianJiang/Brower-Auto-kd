@@ -1520,6 +1520,37 @@ class KingdeeUI:
         if not idxs:
             raise RuntimeError(f"没有匹配到任何行：{bill_nos}")
 
+        # ★★★ 2026-11-01（SF-70 根治，用户提的方案）：**命中的就是列表全部行时，走表头全选。**
+        #   典型场景：已按单号过滤成只剩这一张应收单的明细行 → 点一次表头全选框，
+        #   一次点击、一次回读，不存在「逐行点 N 次、其中某次被遮罩吃掉」的机会。
+        #   判据必须严格：len(idxs) == 当前页渲染行数（列表里没有别的单），否则会误选。
+        meta = eval_all_frames(self.page, self._INVISIBLE + """() => {
+            const g = Array.from(document.querySelectorAll('table.k-selectable')).filter(vis)[0];
+            if (!g) return {rows: -1, checked: false};
+            const cb = g.querySelector('input[data-field="SELECTED"][data-rowid="-99"]')
+                    || g.querySelector('input.gridCheckHeader');
+            return {rows: g.querySelectorAll('tbody tr').length, checked: !!(cb && cb.checked)};
+        }""")
+        if (isinstance(meta, dict) and meta.get("rows", 0) > 0
+                and len(idxs) == meta["rows"]):
+            self.log.info(f"命中行 == 列表全部行（{meta['rows']} 行），改用表头全选")
+            if meta.get("checked"):
+                real0 = self.selected_count()
+                if isinstance(real0, int) and real0 >= len(idxs):
+                    self.log.ok(f"表头已是全选态，真实选中 {real0} 行")
+                    return len(idxs)
+            try:
+                got = self.select_all_rows()
+            except Exception as e:  # noqa: BLE001
+                self.log.warn(f"表头全选失败（{str(e)[:80]}），回退逐行勾选")
+            else:
+                self.page.wait_for_timeout(600)
+                real0 = self.selected_count() or got
+                if isinstance(real0, int) and real0 >= len(idxs):
+                    self.log.ok(f"表头全选完成：真实选中 {real0} 行 = 命中 {len(idxs)} 行")
+                    return len(idxs)
+                self.log.warn(f"表头全选只选中 {real0} 行（期望 {len(idxs)}），回退逐行勾选")
+
         pos_js = self._INVISIBLE + """(i) => {
             const g = Array.from(document.querySelectorAll('table.k-selectable')).filter(vis)[0];
             const tr = Array.from(g.querySelectorAll('tbody tr'))[i];
