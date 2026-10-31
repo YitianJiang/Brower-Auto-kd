@@ -635,58 +635,117 @@ def step_receivable(ui, args, outstock_rows):
 # ------------------------------------------------------------------
 # 步骤 2：应收单下推专票（分录合并）
 # ------------------------------------------------------------------
+# 应收单明细三项金额（**原币**，FOR 后缀）。三项必须同源同币种才可比：
+#   · 用明细 FOR 列逐行求和，不用单头 FNOTAXAMOUNT/FTaxAmount —— 单头可能记本位币，
+#     外币单一比就错。
+#   · 不合并 FAllAmountFor / FBillAllAmount（后者不存在，见 MEMORY 字段坑）。
+AR_AMT_ENTRY_FIELDS = ("FNOTAXAMOUNTFOR_D", "FTAXAMOUNTFOR_D", "FALLAMOUNTFOR_D")
+AMT_KEYS = ("notax", "tax", "all")
+AMT_NAMES = {"notax": "不含税", "tax": "税额", "all": "价税合计"}
+
+
+def _ar_amounts(kq, ar_no):
+    """服务端读应收单明细三项金额（原币）→ ({'notax','tax','all'}, 明细行数)。"""
+    # ⚠️ 明细只放明细字段：混单头字段会被去重成单据头条数（SF-66）
+    det = kq.rows("AR_receivable",
+                  "FMaterialId.FNumber," + ",".join(AR_AMT_ENTRY_FIELDS),
+                  f"FBillNo = '{ar_no}'", top=2000)
+    if not det:
+        return None, 0
+    return {k: sum(to_d(r[f]) for r in det) for k, f in zip(AMT_KEYS, AR_AMT_ENTRY_FIELDS)}, len(det)
+
+
 def _verify_invoice_vs_ar(ui, ar_no, detail, merge, log):
-    """专票 ↔ 应收单 服务端反证（SF-69，2026-10-31 杭州 8 张漏行事故后补）。
+    """专票 ↔ 应收单 服务端反证（SF-69 / SF-72，2026-10-31 杭州 8 张漏行事故后补）。
 
     为什么必须做：专票下推后金蝶**不会**告诉你「少带了几行」——专票界面自己的
     明细合计是自洽的，批次 result.json 也照记 chain_ok=true。10/31 杭州账套就有
     8 张票各少 1~2 行整行物料（合计少开 69,836.75），当时只 warn 不拦 → 一路存到凭证。
 
-    判据（按优先级）：
-      ① **专票价税合计 == 应收单 FAllAmountFor**（Decimal 精确到分，**差 1 分也抛错**）
-         —— 与合并/不合并无关，最硬；不符 = 漏行或金额被改，**抛错，绝不保存**。
-      ② 不合并（--no-invoice-merge）时专票行数应 == 应收单明细行数；不等只 warn
-         （可能只是 0 元赠品行被金蝶过滤，金额已由 ① 兜住）。
+    判据（**三项全部精确相等**，Decimal 量化到分，差 1 分也抛错、绝不保存）：
+      ① 不含税：专票 Σ FNOTAXAMOUNT   ==  应收 Σ FNOTAXAMOUNTFOR_D
+      ② 税　额：专票 Σ FDETAILTAXAMOUNT ==  应收 Σ FTAXAMOUNTFOR_D
+      ③ 价税合计：专票 Σ FALLAMOUNT     ==  应收 Σ FALLAMOUNTFOR_D
+      ④ 不合并（--no-invoice-merge）时行数应 == 应收明细行数；不等只 warn
+         （0 元/赠品行可能被金蝶过滤，金额已由 ①②③ 兜住）。
 
-    ⚠️ 为什么是「完全相等」而不是「差 ≤ 0.01」：价税合计是**逐行原值搬运**，不做任何
-       税额分摊，实测杭州 10 月 83 张票额相符的单差异**全部是 0.00**。
-       写 `abs(diff) > 0.01` 等于「差正好 1 分就放行」，那是给漏行留后门：
-       真出现 1 分差也该人工看一眼，而不是让脚本替它判断「无所谓」。
-       两边都已量化到分（Decimal），直接 `!=` 就是分位精确，不存在浮点误差。
+    ⚠️ 三项都卡，不能只卡价税合计：两条金额只要「不含税少 x、税额多 x」就能凑出
+       相同的价税合计（税额算错时最常见），只比合计等于放过。
+    ⚠️ 为什么是「完全相等」而不是「差 ≤ 0.01」：三项都是逐行原值搬运，不做税额分摊；
+       实测杭州 10 月 83 张票额相符的单，价税合计差异**全部是 0.00**。
+       写 `abs(diff) > 0.01` 等于「差正好 1 分就放行」，那是给漏行/错税额留后门。
     """
     from kdquery import KdQuery
 
     kq = KdQuery(ui.page)
     try:
-        head = kq.rows("AR_receivable", "FBillNo,FAllAmountFor", f"FBillNo = '{ar_no}'", top=5)
-        # ⚠️ 明细只放明细字段：混单头字段会被去重成单据头条数（SF-66）
-        det = kq.rows("AR_receivable", "FMaterialId.FNumber,FPriceQty,FALLAMOUNTFOR_D",
-                      f"FBillNo = '{ar_no}'", top=2000)
+        ar, n_det = _ar_amounts(kq, ar_no)
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(
             f"专票反证失败：读不到应收单 {ar_no} 的服务端数据（{str(e)[:120]}）—— "
             f"无法证明专票没漏行，已停止（未保存）")
+    if not ar:
+        raise RuntimeError(f"专票反证失败：服务端查不到应收单 {ar_no} 的明细，已停止（未保存）")
 
-    if not head:
-        raise RuntimeError(f"专票反证失败：服务端查不到应收单 {ar_no}，已停止（未保存）")
+    iv = {k: sum(r[k] for r in detail) for k in AMT_KEYS}
+    log.info(f"[专票反证] 专票 {len(detail)} 行：不含税 {_money(iv['notax'])} / "
+             f"税额 {_money(iv['tax'])} / 价税 {_money(iv['all'])}"
+             f"  ←  应收 {ar_no} {n_det} 行：不含税 {_money(ar['notax'])} / "
+             f"税额 {_money(ar['tax'])} / 价税 {_money(ar['all'])}")
 
-    ar_all = to_d(head[0]["FAllAmountFor"])
-    iv_all = sum(r["all"] for r in detail)
-    log.info(f"[专票反证] 专票 {len(detail)} 行 / 价税 {_money(iv_all)}"
-             f"  ←  应收 {ar_no} {len(det)} 行 / 价税 {_money(ar_all)}")
-
-    if iv_all != ar_all:
+    bad = [(k, iv[k], ar[k]) for k in AMT_KEYS if iv[k] != ar[k]]
+    if bad:
         shot(ui.page, SHOT_DIR, "invoice_amt_mismatch", log)
+        seg = "；".join(f"{AMT_NAMES[k]} 专票 {_money(a)} vs 应收 {_money(b)}"
+                        f"（差 {_money(a - b)}）" for k, a, b in bad)
         raise RuntimeError(
-            f"专票价税合计与应收单不符：专票 {_money(iv_all)} vs 应收 {_money(ar_all)}，"
-            f"差 {_money(iv_all - ar_all)}（要求**完全相等**，差 1 分也不放行）—— "
-            f"下推漏行/金额被改（SF-69）。已停止，**未保存**，"
-            f"请人工核对这张应收单的明细是否全部带出。")
-    log.ok("专票价税合计与应收单一致")
+            f"专票与应收单金额不符：{seg}。要求三项**完全相等**，差 1 分也不放行 —— "
+            f"下推漏行 / 税额被重算（SF-69/SF-72）。已停止，**未保存**。"
+            f"排查顺序：① 若为「分录合并」模式，改用 --no-invoice-merge 逐行继承再试"
+            f"（合并后金蝶可能按汇总金额重算税额，差几分）；"
+            f"② 若该单有折扣分摊，人工确认票面口径（明细含税合计会与单头天然不等）。")
+    log.ok("专票 不含税 / 税额 / 价税合计 三项与应收单完全一致")
 
-    if not merge and det and len(detail) != len(det):
-        log.warn(f"专票 {len(detail)} 行 ≠ 应收明细 {len(det)} 行（金额已对上，"
+    if not merge and n_det and len(detail) != n_det:
+        log.warn(f"专票 {len(detail)} 行 ≠ 应收明细 {n_det} 行（三项金额已完全对上，"
                  f"可能是 0 元/赠品行被过滤，请人工扫一眼）")
+
+
+def _verify_invoice_saved(ui, inv_no, ar_no, log):
+    """保存后**回读服务端**专票三项，再与应收单比一次（凡写必回读）。
+
+    保存前比的是界面读数；金蝶在保存/提交时可能重算税额（尤其分录合并后），
+    所以保存后必须用 IV_SALESIC 的真实落库值再验一遍 —— 这一步不过，绝不许去生成凭证。
+    """
+    from kdquery import KdQuery
+
+    if not inv_no:
+        raise RuntimeError("专票已保存但读不到单号，无法回读金额（不生成凭证）")
+    kq = KdQuery(ui.page)
+    try:
+        rows = kq.rows("IV_SALESIC", "FBillNo,FNotaxAmount,FDETAILTAXAMOUNT,FAllAmount",
+                       f"FBillNo = '{inv_no}'", top=5000)
+        ar, _ = _ar_amounts(kq, ar_no)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"专票保存后回读失败（{str(e)[:120]}）—— 未生成凭证，请人工核对")
+    if not rows:
+        raise RuntimeError(f"专票保存后回读不到 {inv_no} 的明细 —— 未生成凭证")
+    if not ar:
+        raise RuntimeError(f"专票保存后回读不到应收单 {ar_no} 的明细 —— 未生成凭证")
+
+    iv = {k: sum(to_d(r[f]) for r in rows)
+          for k, f in zip(AMT_KEYS, ("FNotaxAmount", "FDETAILTAXAMOUNT", "FAllAmount"))}
+    bad = [(k, iv[k], ar[k]) for k in AMT_KEYS if iv[k] != ar[k]]
+    log.info(f"[保存后回读] {inv_no} {len(rows)} 行：不含税 {_money(iv['notax'])} / "
+             f"税额 {_money(iv['tax'])} / 价税 {_money(iv['all'])}")
+    if bad:
+        seg = "；".join(f"{AMT_NAMES[k]} 专票 {_money(a)} vs 应收 {_money(b)}"
+                        f"（差 {_money(a - b)}）" for k, a, b in bad)
+        shot(ui.page, SHOT_DIR, "invoice_saved_mismatch", log)
+        raise RuntimeError(
+            f"专票 {inv_no} 落库后与应收单金额不符：{seg}。**专票已保存但金额不对**，"
+            f"已停止，不生成凭证 —— 请作废该专票后重推（不要删凭证，也不要留着错票进账）。")
+    log.ok(f"保存后回读：{inv_no} 三项与应收单 {ar_no} 完全一致")
 
 
 def step_invoice(ui, args, ar_no):
@@ -781,6 +840,8 @@ def step_invoice(ui, args, ar_no):
         inv_no = _backfill_no(ui, "iv", since=_since_str(3))
     inv_no = _verify_iv_no(ui, inv_no, ar_no)   # ★ 服务端反证：读数必须能被来源应收单反查到
     log.ok(f"专票已保存：{inv_no or '(单号未读到)'}")
+    # ★ 2026-11-01（SF-72）：保存前比的是界面读数，保存后必须回读服务端再比一次三项金额
+    _verify_invoice_saved(ui, inv_no, ar_no, log)
     shot(ui.page, SHOT_DIR, "pushchain_invoice", log)
     return inv_no
 
