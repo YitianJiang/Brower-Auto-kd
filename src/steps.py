@@ -2865,7 +2865,7 @@ class KingdeeUI:
 
     def detail_align_totals(self, target_notax=None, target_tax=None,
                             target_all=None, kind="receivable", tol="0.00",
-                            max_rounds=4, anchor=None):
+                            max_rounds=4, anchor=None, max_gap=None):
         """★ 闭环对齐：把总不含税 / 总税额 / 总价税合计顶到目标值（默认落在金额最大的那行）。
 
         每一步都**读页面实际合计**再算差，所以对金蝶的取整怪癖免疫。
@@ -2892,6 +2892,14 @@ class KingdeeUI:
         ★ 2026-10-03 加固（SF-54）：
           · `_fix()` 写完**回读该锚点行**，没落到位立刻 warn（写动作不抛异常 ≠ 值进去了）；
           · 循环里比对**相邻两轮的合计快照**，一模一样 ⇒ 写入未生效 ⇒ 提前 return。
+
+        ★★ 2026-10-31 加固（SF-63「强行对齐」）：`max_gap` 给出**允许的最大初始偏差**。
+          本函数本质是「尾差对齐」（分位级舍入），不是「补数工具」。历史上杰翙 AR-0018
+          出库单勾选漏 1 行（39→38，TLA8白浆 200kg / 2,400.00），却因为对齐把差额
+          2,123.87 摊到 seq=7 那行不含税上 → 表面金额与下推表一致、数量少 200kg。
+          ⇒ 生产调用点（push_chain / gy3_2_fill_ar）必须传 `max_gap="1.00"`：
+            初始偏差超过 1 元 = 漏行/错单，**直接抛错，一行都不许改**。
+          （默认 None = 不限制，仅供 selftest 等离线用例使用。）
         """
         from discount import to_d, summarize, pick_anchor_row
         f = self.amount_fields(kind)
@@ -2899,6 +2907,20 @@ class KingdeeUI:
         t_tax = to_d(target_tax) if target_tax is not None else None
         t_all = to_d(target_all) if target_all is not None else None
         tol_d = to_d(tol)
+
+        if max_gap is not None:
+            _g = to_d(max_gap)
+            _pre = self.detail_summary(kind, target_notax=t_notax,
+                                       target_tax=t_tax, target_all=t_all)
+            _worst, _which = to_d(0), ""
+            for _k, _lbl in (("d_notax", "不含税"), ("d_tax", "税额"), ("d_all", "价税合计")):
+                if _k in _pre and abs(_pre[_k]) > abs(_worst):
+                    _worst, _which = _pre[_k], _lbl
+            if abs(_worst) > _g:
+                raise RuntimeError(
+                    f"金额偏差过大，拒绝「对齐补数」：{_which} 差 {_worst:+.2f}，"
+                    f"超过允许的尾差上限 {_g:.2f} —— 这不是舍入尾差，是漏行/错单"
+                    f"（明细 {_pre.get('n')} 行）。已停止，未改任何单元格。")
 
         def _fix(rows, s, key, fld):
             """按「当前 − 目标」的反向修正锚点行。

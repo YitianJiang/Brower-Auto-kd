@@ -69,7 +69,8 @@ def main():
 
         # ---------- ② 尾差对齐 ----------
         s = ui.detail_align_totals(target_notax=TARGET_NOTAX,
-                                   target_tax=TARGET_TAX, kind="receivable")
+                                   target_tax=TARGET_TAX, kind="receivable",
+                                   max_gap="1.00")
         log.info(f"对齐结果：不含税 {money(s['notax'])}（{s.get('d_notax')}）"
                  f" / 税额 {money(s['tax'])}（{s.get('d_tax')}）"
                  f" / 价税合计 {money(s['all'])}  ok={s['ok']}")

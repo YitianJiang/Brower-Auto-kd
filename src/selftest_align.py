@@ -72,6 +72,11 @@ class StubUI:
     def detail_amounts(self, kind="receivable"):
         return [dict(r) for r in self._rows]
 
+    def detail_summary(self, kind="receivable", **kw):
+        from discount import summarize
+        return summarize([dict(r) for r in self._rows],
+                         all_field="all", disc_field="discount", **kw)
+
     def detail_set_cell(self, idx, field, value, settle_ms=0):
         key = self._F2K[field]
         self.writes.append((idx, key, value))
@@ -138,8 +143,22 @@ def case_partial_write():
     return f"不含税 {s['notax']} 已顶正 · 税额 {s['tax']} 写不动 → 早停"
 
 
+def case_max_gap_refuses():
+    """④ 初始偏差远超尾差（漏行补数，SF-63）→ 传 max_gap 时必须拒绝对齐、一个格子都不改。"""
+    ui = StubUI(_rows([1000, 2000, 3000], [130, 260, 390]))
+    try:
+        KingdeeUI.detail_align_totals(ui, target_notax="8100.00", target_tax="880.00",
+                                      max_gap="1.00")
+    except RuntimeError as e:
+        assert "拒绝" in str(e) and "漏行" in str(e), f"报错文案不对：{e}"
+        assert not ui.writes, f"拒绝对齐时不得改任何单元格，实际写了 {len(ui.writes)} 次"
+        return f"偏差 2,000 被拒（未改 {len(ui.writes)} 个格子）"
+    raise AssertionError("应抛 RuntimeError 拒绝对齐")
+
+
 def main():
-    for i, fn in enumerate((case_ok_write, case_dead_write, case_partial_write), 1):
+    for i, fn in enumerate((case_ok_write, case_dead_write, case_partial_write,
+                            case_max_gap_refuses), 1):
         try:
             msg = fn()
         except AssertionError as e:

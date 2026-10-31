@@ -340,7 +340,27 @@ def filter_outstock(ui, args):
         sel = ui.select_rows(want)
     else:
         sel = ui.select_all_rows()
-    log.info(f"勾选结果：命中 {sel} 行；真实选中 {ui.selected_count()}")
+    real = ui.selected_count()
+    log.info(f"勾选结果：命中 {sel} 行；真实选中 {real}")
+    # ★★ 2026-10-31 硬护栏（SF-58 出库单侧，杰翙 AR-0018 复盘）：
+    #   7 张单 39 行明细，日志实测「命中 39 行 / 真实选中 38 行」，旧代码只 WARN 就继续下推
+    #   → 应收单少 1 行（TLA8白浆 200kg / 2,400.00），随后「金额对齐」把这 2,123.87
+    #     摊进 seq=7 那行不含税 → 表面金额与下推表一致、数量却少 200kg（静默错账）。
+    #   ⇒ 勾选不齐一律先「表头全选」重试，仍不齐就**抛错停下**，绝不带着漏行往下推。
+    if real != sel:
+        log.warn(f"逐行勾选漏行（{real}/{sel}，疑虚拟滚动截断），改用表头全选重勾")
+        ui.clear_selection()
+        sel2 = ui.select_all_rows()
+        real = ui.selected_count()
+        log.info(f"全选后：本期选中 {sel2} 行，真实选中 {real}")
+        sel = sel2
+    if real != sel:
+        shot(ui.page, SHOT_DIR, "outstock_select_truncated", log)
+        log.err(f"出库单勾选行数不符：命中 {sel} 行，真实选中 {real} 行（漏 {sel - real} 行）")
+        log.err("停止：下推会漏行；漏行后「金额对齐」会把差额摊到别的行，"
+                "造成金额对、数量错。请人工核对后重跑。")
+        raise RuntimeError(
+            f"出库单勾选不齐：命中 {sel} 行，真实选中 {real} 行 —— 拒绝下推")
     return rows, sel
 
 
@@ -415,6 +435,41 @@ def step_receivable(ui, args, outstock_rows):
                     raise RuntimeError(
                         f"应收单金额核对不通过：出库单 {ob:.2f} vs 应收单 {base_amt:.2f} "
                         f"（差 {base_amt - ob:+.2f}）")
+
+                # ★★ 2026-10-31 追加（SF-63）：金额相等 ≠ 行数相等。
+                #   杰翙 AR-0018：出库单 39 行，勾选漏 1 行 → 应收单 38 行、少 TLA8白浆 200kg，
+                #   但「金额对齐」把差额 2,123.87 摊给 seq=7 → 价税合计分毫不差、数量少 200kg。
+                #   ⇒ 行数与数量必须与来源出库单同源；不等即停（对齐之前就该拦住）。
+                _cnt, _qty = 0, 0.0
+                for _no in src_nos:
+                    _er = _kq.rows("SAL_OUTSTOCK", "FBillNo,FRealQty",
+                                   f"FBillNo = '{_no}'", top=500)
+                    _cnt += len(_er)
+                    _qty += sum(float(x.get("FRealQty") or 0) for x in _er)
+                _ar_qty = 0.0
+                for _r in detail:
+                    _raw = _r.get("raw") or {}
+                    for _k in ("FPRICEQTY", "FQTY", "FPRICEQTY_D"):
+                        if _raw.get(_k) not in (None, ""):
+                            try:
+                                _ar_qty += float(str(_raw[_k]).replace(",", ""))
+                                break
+                            except (TypeError, ValueError):
+                                continue
+                log.info(f"来源出库单 {_cnt} 行 / 数量 {_qty:g} vs 应收单 {len(detail)} 行"
+                         f" / 数量 {_ar_qty:g}")
+                if _cnt and len(detail) != _cnt:
+                    log.err(f"明细行数不符：出库单 {_cnt} 行 vs 应收单 {len(detail)} 行"
+                            f"（漏 {_cnt - len(detail)} 行）")
+                    raise RuntimeError(
+                        f"应收单明细行数不符：来源出库单 {_cnt} 行 vs 应收单 {len(detail)} 行 "
+                        f"—— 勾选漏行，拒绝保存（金额对齐会把差额摊到别的行）")
+                if _qty and _ar_qty and abs(_ar_qty - _qty) > 0.001:
+                    log.err(f"数量合计不符：出库单 {_qty:g} vs 应收单 {_ar_qty:g}"
+                            f"（差 {_ar_qty - _qty:+g}）")
+                    raise RuntimeError(
+                        f"应收单数量合计不符：来源出库单 {_qty:g} vs 应收单 {_ar_qty:g} "
+                        f"（差 {_ar_qty - _qty:+g}）—— 拒绝保存")
         except RuntimeError:
             raise
         except Exception as _e:  # noqa: BLE001
@@ -437,7 +492,7 @@ def step_receivable(ui, args, outstock_rows):
         log.info(f"★ 金额对齐：不含税→{tn or '(不校)'}  税额→{tt or '(不校)'}"
                  f"  价税合计→{ta or '(不校)'}")
         s = ui.detail_align_totals(target_notax=tn, target_tax=tt, target_all=ta,
-                                   kind="receivable")
+                                   kind="receivable", max_gap="1.00")
         if not s["ok"]:
             shot(ui.page, SHOT_DIR, "align_not_ok", log)
             # ★★ 2026-10-03 修复（SF-01 变体）：以前这里只 warn 然后照样 save_bill()，
