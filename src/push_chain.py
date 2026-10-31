@@ -635,6 +635,53 @@ def step_receivable(ui, args, outstock_rows):
 # ------------------------------------------------------------------
 # 步骤 2：应收单下推专票（分录合并）
 # ------------------------------------------------------------------
+def _verify_invoice_vs_ar(ui, ar_no, detail, merge, log, tol="0.05"):
+    """专票 ↔ 应收单 服务端反证（SF-69，2026-10-31 杭州 8 张漏行事故后补）。
+
+    为什么必须做：专票下推后金蝶**不会**告诉你「少带了几行」——专票界面自己的
+    明细合计是自洽的，批次 result.json 也照记 chain_ok=true。10/31 杭州账套就有
+    8 张票各少 1~2 行整行物料（合计少开 69,836.75），当时只 warn 不拦 → 一路存到凭证。
+
+    判据（按优先级）：
+      ① **专票价税合计 == 应收单 FAllAmountFor**（容差 0.05）—— 与合并/不合并无关，最硬；
+         不符 = 漏行或金额被改，**抛错，绝不保存**。
+      ② 不合并（--no-invoice-merge）时专票行数应 == 应收单明细行数；不等只 warn
+         （可能只是 0 元赠品行被金蝶过滤，金额已由 ① 兜住）。
+    """
+    from kdquery import KdQuery
+
+    kq = KdQuery(ui.page)
+    try:
+        head = kq.rows("AR_receivable", "FBillNo,FAllAmountFor", f"FBillNo = '{ar_no}'", top=5)
+        # ⚠️ 明细只放明细字段：混单头字段会被去重成单据头条数（SF-66）
+        det = kq.rows("AR_receivable", "FMaterialId.FNumber,FPriceQty,FALLAMOUNTFOR_D",
+                      f"FBillNo = '{ar_no}'", top=2000)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            f"专票反证失败：读不到应收单 {ar_no} 的服务端数据（{str(e)[:120]}）—— "
+            f"无法证明专票没漏行，已停止（未保存）")
+
+    if not head:
+        raise RuntimeError(f"专票反证失败：服务端查不到应收单 {ar_no}，已停止（未保存）")
+
+    ar_all = to_d(head[0]["FAllAmountFor"])
+    iv_all = sum(r["all"] for r in detail)
+    log.info(f"[专票反证] 专票 {len(detail)} 行 / 价税 {_money(iv_all)}"
+             f"  ←  应收 {ar_no} {len(det)} 行 / 价税 {_money(ar_all)}")
+
+    if abs(iv_all - ar_all) > to_d(tol):
+        shot(ui.page, SHOT_DIR, "invoice_amt_mismatch", log)
+        raise RuntimeError(
+            f"专票价税合计与应收单不符：专票 {_money(iv_all)} vs 应收 {_money(ar_all)}，"
+            f"差 {_money(iv_all - ar_all)} —— 下推漏行/金额被改（SF-69）。已停止，**未保存**，"
+            f"请人工核对这张应收单的明细是否全部带出。")
+    log.ok("专票价税合计与应收单一致")
+
+    if not merge and det and len(detail) != len(det):
+        log.warn(f"专票 {len(detail)} 行 ≠ 应收明细 {len(det)} 行（金额已对上，"
+                 f"可能是 0 元/赠品行被过滤，请人工扫一眼）")
+
+
 def step_invoice(ui, args, ar_no):
     if not ar_no:
         raise RuntimeError("没有应收单号，无法下推专票（请用 --step receivable 先做，或 --ar-no 指定）")
@@ -676,37 +723,18 @@ def step_invoice(ui, args, ar_no):
     n = ui.select_rows([ar_no])
     real = ui.selected_count()
     log.info(f"应收单列表勾选 {ar_no} → 命中 {n} 行，真实选中 {real} 行")
-    # ★★ 2026-10-28 护栏（华淳蓝字错账 SF-58）：应收单明细多行时，select_rows 勾选
-    #   会被虚拟滚动截断（77 行只真实选中 76 行）→ 专票漏 1 行、金额少 520 元。
-    #   判据用「服务端应收单明细行数」作权威基准（不依赖界面的反证源，见 MEMORY SF-56）：
-    #   界面的 select_rows 命中数 n 可能因虚拟滚动漏扫而偏小（n=76 且 real=76 也能漏），
-    #   所以必须拿 ExecuteBillQuery 的真实明细行数 expected 来卡。
-    try:
-        from kdquery import KdQuery
-        _kq = KdQuery(ui.page)
-        _detail = _kq.rows("AR_receivable", "FBillNo,FMATERIALID.FNumber",
-                           f"FBillNo = '{ar_no}'", top=2000)
-        expected = len(_detail)
-    except Exception as e:  # noqa: BLE001
-        expected = None
-        log.warn(f"读应收单服务端明细行数失败（{str(e)[:100]}），退回只卡命中数")
-    log.info(f"应收单 {ar_no} 服务端明细行数 = {expected}，命中 {n}，真实选中 {real}")
-    if expected is not None and real != expected:
-        # 已按单号过滤成只这一张单，全选 = 选中其全部明细行，天然不漏（不依赖逐行滚动点击）。
-        log.warn(f"逐行勾选漏行（{real}/{expected}），改用表头全选重勾")
-        ui.clear_selection()
-        real = ui.select_all_rows()
-        log.info(f"全选后真实选中 {real} 行")
-    if expected is not None and real != expected:
-        shot(ui.page, SHOT_DIR, "select_truncated", log)
-        raise RuntimeError(
-            f"应收单 {ar_no} 勾选行数不符：服务端明细 {expected} 行，命中 {n} 行，真实选中 {real} 行 —— "
-            f"虚拟滚动/分页导致漏勾，专票会少行错账。已停止，请人工核对后重试。")
-    if expected is None and (real is None or real < n):
+    # ★★ 2026-10-31 修正（SF-69）：这里勾的是**应收单列表**（一张单一行），
+    #   旧代码却拿「应收单明细行数」当期望值 —— 口径根本不匹配：
+    #     · 若服务端查询被去重成 1 行 → 期望 1、实际 1，护栏**空转**（10/31 杭州 8 张
+    #       专票各漏 1~2 行整行物料，正是从这里溜过去的）；
+    #     · 若真的返回明细行数 → 正常单也会被误拦。
+    #   ⇒ 勾选阶段只卡「界面命中 n → 真实选中 real」；行级/金额校验挪到专票下推之后
+    #     （_verify_invoice_vs_ar，那里才有票面明细和合计，能真正抓住漏行）。
+    if real is None or real < n:
         shot(ui.page, SHOT_DIR, "select_truncated", log)
         raise RuntimeError(
             f"应收单 {ar_no} 勾选被截断：命中 {n} 行，真实选中 {real} 行 —— "
-            f"虚拟滚动/分页导致漏勾，专票会少行错账。已停止，请人工检查应收单明细行数后重试。")
+            f"虚拟滚动/分页导致漏勾，专票会少行错账。已停止，请人工核对后重试。")
     ui.push_to_invoice(merge=merge)
     if not ui.activate_tab("销售增值税专用发票 - 新增", timeout_ms=10000):
         raise RuntimeError("没等到专票标签，下推可能失败")
@@ -717,6 +745,9 @@ def step_invoice(ui, args, ar_no):
     log.info(f"专票明细 {len(detail)} 行，价税合计 {_money(tot)}"
              f"（不含税 {_money(sum(r['notax'] for r in detail))}"
              f" / 税额 {_money(sum(r['tax'] for r in detail))}）")
+    # ★★★ 2026-10-31（SF-69）：专票必须与「它自己的应收单」行数 + 价税合计双向对上，
+    #   不符直接抛错（不保存）。旧逻辑只跟批次目标比不含税、且只 warn，挡不住漏行。
+    _verify_invoice_vs_ar(ui, ar_no, detail, merge, log)
     if args.target_notax and abs(sum(r["notax"] for r in detail) - to_d(args.target_notax)) > to_d("0.05"):
         log.warn("专票不含税与目标差 > 0.05，检查应收单是否正确")
     else:
