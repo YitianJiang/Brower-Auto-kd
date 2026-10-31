@@ -3505,9 +3505,20 @@ class KingdeeUI:
 
     # ★★ 2026-10-29（河南华洋事故后补）：金蝶「页签上限 15」这类模态框必须先关掉，
     #   否则它会一直挡在页面上，之后所有的功能页都打不开（点搜索结果 = 点空）。
+    # ★★ 2026-10-31 二次修正：原来用 `e.offsetParent !== null` 判可见性，
+    #   但**模态框是 position:fixed，offsetParent 恒为 null** ⇒ 弹窗永远被判「不可见」
+    #   ⇒ dismiss_quota_dialog() 明明弹窗就在屏幕上却返回 []，遮罩 k-overlay 一直挡点击
+    #   （实测：batch 收尾时台州森恒 push_chain 被 k-overlay 拦截，报上限15）。
+    #   正确判据只看 rect + computed display/visibility，不再碰 offsetParent。
     JS_DISMISS_QUOTA = """() => {
-        const vis = e => { const b = e.getBoundingClientRect();
-            return b.width > 0 && b.height > 0 && e.offsetParent !== null; };
+        const vis = e => {
+            if (!e) return false;
+            const b = e.getBoundingClientRect();
+            const s = getComputedStyle(e);
+            return b.width > 0 && b.height > 0
+                   && s.display !== 'none' && s.visibility !== 'hidden'
+                   && s.opacity !== '0';
+        };
         const out = [];
         Array.from(document.querySelectorAll('.k-window, .k-dialog, .kd-dialog'))
             .filter(vis).forEach(w => {
