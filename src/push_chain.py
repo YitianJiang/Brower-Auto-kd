@@ -246,6 +246,104 @@ def verify_ar_biz_date(ui, ar_no, want, tries=3, gap_ms=1500):
         f"**已停止，不再下推专票/凭证**（SF-55）。请人工确认后处理这张应收单，再重跑。")
 
 
+def verify_ar_line_amount(ui, ar_no, src_nos, tries=3, gap_ms=1500):
+    """保存后逐行回读：每行价税合计必须能由「来源出库单价 × 本行数量 − 本行折扣」解释。
+
+    为什么需要（SF-64，2026-10-31）：
+      「金额对齐」只写金额列（FNOTAXAMOUNTFOR_D / FTAXAMOUNTFOR_D），不动数量与单价，
+      所以能靠 `Σ(数量×单价) ≠ Σ行金额` 事后查出「补数式对齐」的痕迹（SF-63 的指纹）。
+      **但那个指纹是当前前端实现赠送的，不是设计保证。**
+      真人**双击**「不含税金额」输入时，金蝶会**反算单价**（docs/界面结构速查.md 实测），
+      一旦对齐改走那条路径，金额就完全自洽了：Σ(数量×单价) = 行金额、
+      单头金额 = 来源出库金额，内部算术判据全部失效，账面上再也看不出
+      「少了一行、摊进了别处」。
+      历史数据里确实已经有这种单：AR105-202608-0088（南京济丰）的含税单价是
+      16.500232 / 12.700073 / 21.900076 这类「金额÷数量」反算出的 6 位小数。
+      ⇒ 唯一还站得住的判据是**与来源单据勾稽**，而不是单据内部自洽。
+
+    判据（逐行，容差 0.50）：
+        来源出库单价 × 本行数量 − 本行折扣额  ≈  本行价税合计
+      出库单同 (单号, 物料) 有多行不同价时，任一价满足即可。
+      容差 0.50 是实测标定：AR105-202608-0088 那类「折扣分摊 → 单价被反算成
+      6 位小数」的合法单，逐行差 0.08~0.12（反算精度损失）；而真正的摊平/改价
+      都是几百上千量级（杰翙 2,400、AR-0074 3,000），差两个数量级。
+
+    实测回测（2026-07~10）：
+      · AR105-202608-0088（折扣分摊反算单价）→ 最大差 0.12，通过；
+      · AR105-202607-0074（四色黑 19.5→16.5，改价 3,000）→ 报出；
+      · AR105-202610-0018（杰翙，漏行摊平 2,400，单价未变）→ 报出。
+      ⇒ 改金额、改单价两条路径**都被这一条覆盖**。
+    手工单 / 部分下推找不到源行的只计数跳过，不误拦。
+    """
+    if not ar_no or not src_nos:
+        return None
+    from kdquery import KdQuery
+    kq = KdQuery(ui.page)
+
+    ar_rows = []
+    for i in range(1, max(1, tries) + 1):
+        try:
+            ar_rows = kq.rows("AR_receivable",
+                              "FBillNo,FMaterialId.FName,FPriceQty,FTaxPrice,"
+                              "FALLAMOUNTFOR_D,FDISCOUNTAMOUNTFOR,FSourceBillNo",
+                              f"FBillNo = '{ar_no}'", top=500)
+        except Exception as e:  # noqa: BLE001
+            log.warn(f"服务端回读 {ar_no} 明细第 {i} 次失败：{str(e)[:110]}")
+            ar_rows = []
+        if ar_rows:
+            break
+        ui.page.wait_for_timeout(gap_ms)
+    if not ar_rows:
+        log.warn(f"服务端回读 {ar_no} 明细未取到行 —— 逐行金额校验已跳过")
+        return None
+
+    src_price = {}
+    for no in src_nos:
+        try:
+            rows = kq.rows("SAL_OUTSTOCK", "FBillNo,FMaterialId.FName,FTaxPrice",
+                           f"FBillNo = '{no}'", top=500)
+        except Exception as e:  # noqa: BLE001
+            log.warn(f"读来源出库单 {no} 单价失败（跳过该单）：{str(e)[:90]}")
+            continue
+        for r in rows:
+            k = (str(r.get("FBillNo") or ""), str(r.get("FMaterialId.FName") or ""))
+            src_price.setdefault(k, set()).add(round(float(r.get("FTaxPrice") or 0), 6))
+
+    bad, miss, ok = [], 0, 0
+    for r in ar_rows:
+        k = (str(r.get("FSourceBillNo") or ""),
+             str(r.get("FMaterialId.FName") or ""))
+        want = src_price.get(k)
+        if not want:
+            miss += 1
+            continue
+        qty = float(r.get("FPriceQty") or 0)
+        amt = float(r.get("FALLAMOUNTFOR_D") or 0)
+        disc = float(r.get("FDISCOUNTAMOUNTFOR") or 0)
+        # 行金额必须能由「来源单价 × 本行数量 − 本行折扣」解释（容差 0.50，
+        # 见 docstring：合法反算单最大 0.12，真摊平 ≥ 数百）
+        if any(abs(p * qty - disc - amt) <= 0.50 for p in want):
+            ok += 1
+        else:
+            bad.append((k[1], qty, amt, disc, sorted(want),
+                        round(float(r.get("FTaxPrice") or 0), 6)))
+
+    log.info(f"逐行金额回读：可解释 {ok} 行 / 不符 {len(bad)} 行 / 源行未匹配 {miss} 行"
+             f"（来源单 {len(src_nos)} 张）")
+    if bad:
+        for m, q, amt, disc, prices, px in bad[:5]:
+            expect = "；".join(f"{p * q - disc:,.2f}" for p in prices)
+            log.err(f"  行金额不符：{m} 数量 {q:g} 折扣 {disc:,.2f} "
+                    f"行金额 {amt:,.2f}（按出库单价应为 {expect}），当前单价 {px}")
+        raise RuntimeError(
+            f"★ 应收单 {ar_no} 有 {len(bad)} 行金额无法由来源出库单解释"
+            f"（例：{bad[0][0]} 数量 {bad[0][1]:g}、行金额 {bad[0][2]:,.2f}、"
+            f"出库单价 {bad[0][4]}）。说明差额被摊进了金额或单价 —— 若摊进单价，"
+            f"单据内部会变得完全自洽，事后无法用 Σ(数量×单价) 反查。"
+            f"**已停止，不再下推专票/凭证**，请人工核对这张应收单（SF-64）。")
+    return ok
+
+
 # ------------------------------------------------------------------
 # 步骤 0：出库单列表筛选 + 勾选
 # ------------------------------------------------------------------
@@ -395,6 +493,7 @@ def step_receivable(ui, args, outstock_rows):
         log.info(f"  行{i}: seq={r['seq']} 价税合计={_money(r['all'])} 不含税={_money(r['notax'])}")
 
     base_amt = sum(r["all"] for r in detail)
+    src_nos = []          # 来源出库单号（保存后「单价同源」回读要用，须在函数级可见）
     if args.customer and outstock_rows:
         # ★★ 2026-10-28 金额一致性硬护栏（安徽济丰错账根因 2/2）：
         #   安徽济丰出库单 119906.17，下推应收单明细却只有 49035.38（差 70870.79），
@@ -525,6 +624,10 @@ def step_receivable(ui, args, outstock_rows):
     # ★ 2026-10-03（SF-55）：**服务端**回读业务日期。界面回显/日志都不算数，
     #   ExecuteBillQuery 才算数。不符就在推专票之前拦下，别让错误沿链扩散。
     verify_ar_biz_date(ui, ar_no, args.biz_date)
+    # ★ 2026-10-31（SF-64）：逐行金额守恒回读 —— 差额被摊进**单价**时唯一还站得住的判据。
+    #   摊进金额（当前路径）事后能用 Σ(数量×单价) 反查；摊进单价则单据内部完全自洽，
+    #   只能与来源出库单勾稽。历史已有先例（AR-202608-0088 的 6 位小数反算单价）。
+    verify_ar_line_amount(ui, ar_no, src_nos)
     shot(ui.page, SHOT_DIR, "pushchain_receivable", log)
     return ar_no
 
