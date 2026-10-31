@@ -60,3 +60,6 @@ src/precheck_repush.py
 src/dump_receipt_detail.py
 src/recompute_digest.py
 src/set_bill_date.py
+
+# 临时探针/调试脚本（一次性，不入库）
+.tmp/
