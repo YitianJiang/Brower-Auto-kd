@@ -1480,10 +1480,12 @@ class KingdeeUI:
         self.log.ok(f"日期过滤已应用：{field} {start} ~ {end}")
         return True
 
-    def select_rows(self, bill_nos, settle_ms=320):
+    def select_rows(self, bill_nos, settle_ms=320, strict=False):
         """
         按单号勾选指定行（该单号下的**全部明细行**都会被勾上）。
         bill_nos 为空则退化为全选。
+
+        strict=True：最后「真实选中数 < 命中数」直接抛错（下推类不可逆动作用）。
 
         ⚠️ 血泪坑 1（2026-09-21 修复）：老实现直接扫
            `document.querySelectorAll('tbody tr')` —— 命中的是 SPA 里**隐藏页面**
@@ -1533,30 +1535,85 @@ class KingdeeUI:
                     top: top ? (top.tagName + '.' + String(top.className || '').slice(0, 40)) : null};
         }"""
 
-        clicked = already = 0
-        for i in idxs:
-            if not eval_all_frames(self.page, pos_js, [i]):
-                continue
-            info = eval_all_frames(self.page, pos_js, [i])
-            if not isinstance(info, dict) or info.get("err"):
-                self.log.warn(f"第 {i} 行定位失败：{info}")
-                continue
-            if info.get("checked"):
-                already += 1
-                continue
-            if info.get("blocked"):
-                self.log.warn(f"第 {i} 行复选框被遮挡（命中 {info.get('top')}），仍尝试点击")
-            self.page.mouse.click(info["x"], info["y"])
-            self.page.wait_for_timeout(settle_ms)
-            clicked += 1
+        # ★★★ 2026-11-01（SF-70）：逐行点复选框必须「等遮罩 + 逐个回读 + 重试轮」。
+        #   10/27 批次 8 张应收单专票漏行，日志全是「命中 N 行、真实选中 N-1 行」，
+        #   其中 2 张直接打出「第 N 行复选框被遮挡（命中 DIV.kd-ui-blockingExtention-item），
+        #   仍尝试点击」—— 金蝶 grid 会给行盖一层临时阻塞遮罩，真实鼠标点到遮罩上 = 点空，
+        #   该明细行没被勾上 → 下推只转已勾行 → 专票少一整行（金额也跟着少）。
+        #   手工点不会漏：人点的时候遮罩早散了，且人看得见没勾上会再点一次。
+        clicked = 0
+        first_round_checked = 0
+        pending = list(idxs)
+        for rnd in range(1, 4):
+            still = []
+            for i in pending:
+                info = eval_all_frames(self.page, pos_js, [i])
+                if not isinstance(info, dict) or info.get("err"):
+                    self.log.warn(f"第 {i} 行定位失败：{info}")
+                    continue
+                if info.get("checked"):
+                    if rnd == 1:
+                        first_round_checked += 1
+                    continue
+                # 遮挡：先等遮罩消失（最多 ~2.4s），绝不在遮罩上盲点
+                if info.get("blocked"):
+                    for _ in range(8):
+                        self.page.wait_for_timeout(300)
+                        again = eval_all_frames(self.page, pos_js, [i])
+                        if (isinstance(again, dict) and not again.get("err")
+                                and not again.get("blocked") and not again.get("checked")):
+                            info = again
+                            break
+                        if isinstance(again, dict) and again.get("checked"):
+                            info = None
+                            break
+                    if info is None:
+                        continue
+                    if info.get("blocked"):
+                        self.log.warn(f"第 {i} 行复选框长时间被遮挡"
+                                      f"（命中 {info.get('top')}），仍尝试点击")
+                self.page.mouse.click(info["x"], info["y"])
+                self.page.wait_for_timeout(settle_ms)
+                clicked += 1
+                # 逐个回读：点完立刻确认真的勾上了（点空/被遮罩吃掉是最常见的静默失败）
+                chk = eval_all_frames(self.page, pos_js, [i])
+                if not (isinstance(chk, dict) and chk.get("checked")):
+                    still.append(i)
+            if not still:
+                break
+            self.log.warn(f"第 {rnd}/3 轮仍有 {len(still)} 行没勾上（{still}），重试")
+            pending = still
+            self.page.wait_for_timeout(400)
 
         self.page.wait_for_timeout(900)
         real = self.selected_count()
-        self.log.info(f"按单号勾选：命中 {len(idxs)} 行（新勾 {clicked}、原已勾 {already}）"
-                      f"，真实选中 {real} 行")
-        if real is None or real < len(idxs):
-            self.log.warn(f"真实选中数（{real}）少于命中行数（{len(idxs)}），"
-                          f"请核对是否被虚拟滚动/分页截断")
+        # 兜底：分页栏读不到「已选 N 行」时，用逐行回读的 checked 数判定
+        #   （虚拟滚动下 trs[i] 取不到的行不计，只在 real is None 时当依据）
+        dom_checked = eval_all_frames(self.page, self._INVISIBLE + """(idx) => {
+            const g = Array.from(document.querySelectorAll('table.k-selectable')).filter(vis)[0];
+            if (!g) return -1;
+            const trs = Array.from(g.querySelectorAll('tbody tr'));
+            let n = 0;
+            idx.forEach(i => {
+                const tr = trs[i];
+                const cb = tr && tr.querySelector('input.gridCheck');
+                if (cb && cb.checked) n++;
+            });
+            return n;
+        }""", list(idxs))
+        self.log.info(f"按单号勾选：命中 {len(idxs)} 行（原已勾 {first_round_checked}、"
+                      f"点击 {clicked} 次）→ 真实选中 {real} 行（逐行回读 {dom_checked}）")
+        ok = (isinstance(real, int) and real >= len(idxs))
+        if not ok and real is None and dom_checked == len(idxs):
+            ok = True
+            self.log.info("（分页栏读不到已选数，按逐行回读确认已全部勾上）")
+        if not ok:
+            msg = (f"勾选不完整：命中 {len(idxs)} 行，真实选中 {real} 行"
+                   f"（逐行回读 {dom_checked}/差 {len(idxs) - (real or 0)} 行）—— "
+                   f"被遮罩/虚拟滚动吃掉，下推会少明细行")
+            if strict:
+                raise RuntimeError(msg)
+            self.log.warn(msg + "，请核对")
         return len(idxs)
 
     # ---------- 菜单按钮（已验证） ----------

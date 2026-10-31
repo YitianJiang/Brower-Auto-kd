@@ -635,7 +635,7 @@ def step_receivable(ui, args, outstock_rows):
 # ------------------------------------------------------------------
 # 步骤 2：应收单下推专票（分录合并）
 # ------------------------------------------------------------------
-def _verify_invoice_vs_ar(ui, ar_no, detail, merge, log, tol="0.05"):
+def _verify_invoice_vs_ar(ui, ar_no, detail, merge, log, tol="0.01"):
     """专票 ↔ 应收单 服务端反证（SF-69，2026-10-31 杭州 8 张漏行事故后补）。
 
     为什么必须做：专票下推后金蝶**不会**告诉你「少带了几行」——专票界面自己的
@@ -643,10 +643,15 @@ def _verify_invoice_vs_ar(ui, ar_no, detail, merge, log, tol="0.05"):
     8 张票各少 1~2 行整行物料（合计少开 69,836.75），当时只 warn 不拦 → 一路存到凭证。
 
     判据（按优先级）：
-      ① **专票价税合计 == 应收单 FAllAmountFor**（容差 0.05）—— 与合并/不合并无关，最硬；
+      ① **专票价税合计 == 应收单 FAllAmountFor**（容差 0.01 = 一分）—— 与合并/不合并无关，最硬；
          不符 = 漏行或金额被改，**抛错，绝不保存**。
       ② 不合并（--no-invoice-merge）时专票行数应 == 应收单明细行数；不等只 warn
          （可能只是 0 元赠品行被金蝶过滤，金额已由 ① 兜住）。
+
+    ⚠️ 容差为什么是 0.01 而不是 0.05：价税合计是**逐行原值搬运**，不做任何税额分摊，
+       实测杭州 10 月 83 张票额相符的单，差异**全部是 0.00**（一分不差）。
+       0.05 属于沿用的金额比对惯例，纯属放水，已收紧到分；留 1 分是为了容
+       极端情况下 Kendo 网格显示/回读的最后一位舍入，不是给「差几分」开绿灯。
     """
     from kdquery import KdQuery
 
@@ -720,7 +725,8 @@ def step_invoice(ui, args, ar_no):
         log.info(f"按单号过滤 {ar_no} → 列表 {n_f} 行")
     except Exception as e:  # noqa: BLE001
         log.warn(f"按单号过滤失败（{str(e)[:100]}），退回直接勾选（可能翻不到页）")
-    n = ui.select_rows([ar_no])
+    # strict=True：内部带「等遮罩 + 逐个回读 + 3 轮重试」，重试完仍少行就抛错（SF-70）
+    n = ui.select_rows([ar_no], strict=True)
     real = ui.selected_count()
     log.info(f"应收单列表勾选 {ar_no} → 命中 {n} 行，真实选中 {real} 行")
     # ★★ 2026-10-31 修正（SF-69）：这里勾的是**应收单列表**（一张单一行），
