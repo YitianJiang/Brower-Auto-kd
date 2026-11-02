@@ -802,6 +802,49 @@ def _verify_invoice_saved(ui, inv_no, ar_no, log):
     log.ok(f"保存后回读：{inv_no} 三项与应收单 {ar_no} 完全一致")
 
 
+_NETLOCK_JS = """() => {
+  const vis = e => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && s.display !== 'none'
+           && s.visibility !== 'hidden' && s.opacity !== '0'; };
+  const wins = Array.from(document.querySelectorAll('.k-window')).filter(vis);
+  for (const w of wins) {
+    const t = (w.innerText || '').replace(/\\s+/g, ' ').trim();
+    if (t.indexOf('网控') < 0 && t.indexOf('网络控制') < 0 && t.indexOf('冲突') < 0) continue;
+    const btns = Array.from(w.querySelectorAll('a,button,span')).filter(vis)
+      .map(e => ({ txt: (e.innerText || '').trim(), r: e.getBoundingClientRect() }))
+      .filter(b => ['继续', '取消', '确定'].indexOf(b.txt) >= 0)
+      .map(b => ({ txt: b.txt, x: Math.round(b.r.x + b.r.width / 2),
+                   y: Math.round(b.r.y + b.r.height / 2) }));
+    return { text: t.slice(0, 400), btns };
+  }
+  return null;
+}"""
+
+
+def _netlock_conflict(ui):
+    """下推后若弹「单据转换网控提示」→ 点取消并返回弹窗原文；没有则返回 None。
+
+    ★ 绝不点「继续」：它会过滤掉被网控锁占住的单据，只转换剩余部分，
+      界面不提示少了什么 —— 专票会静默缺行（SF-79）。
+    """
+    try:
+        d = ui.page.evaluate(_NETLOCK_JS)
+    except Exception:  # noqa: BLE001
+        return None
+    if not d:
+        return None
+    log.err(f"★ 下推被网控拦住：{d['text'][:200]}")
+    for b in d.get("btns") or []:
+        if b["txt"] == "取消":
+            try:
+                ui.page.mouse.click(b["x"], b["y"])
+                ui.page.wait_for_timeout(1200)
+            except Exception:  # noqa: BLE001
+                pass
+            break
+    return d["text"]
+
+
 def step_invoice(ui, args, ar_no):
     ars = _split_ars(ar_no)
     if not ars:
@@ -897,6 +940,17 @@ def step_invoice(ui, args, ar_no):
             f"应收单 {ar_no} 勾选被截断：命中 {n} 行，真实选中 {real} 行 —— "
             f"虚拟滚动/分页导致漏勾，专票会少行错账。已停止，请人工核对后重试。")
     ui.push_to_invoice(merge=merge)
+    # ★★★ 2026-11-02（SF-79）：下推后可能弹出「单据转换网控提示」——某张应收单被
+    #   网控锁占着（上一次中断的转换没释放）。弹窗里「继续」会**静默丢掉被锁的单据**，
+    #   只转换剩下的，界面上看不出少了什么。绝不能点继续，必须取消并明确报错。
+    netlock = _netlock_conflict(ui)
+    if netlock:
+        shot(ui.page, SHOT_DIR, "netlock_conflict", log)
+        raise RuntimeError(
+            f"单据转换被网控锁拦住（不是勾选问题）：{netlock}\n"
+            f"★ 不要点「继续」（会静默丢掉被锁的应收单，只推剩下的）。\n"
+            f"解法：登录会话里残留的网控锁只能靠**重新登录**释放（登出→登录），"
+            f"然后重跑本条命令。")
     if not ui.activate_tab("销售增值税专用发票 - 新增", timeout_ms=10000):
         raise RuntimeError("没等到专票标签，下推可能失败")
     ui.page.wait_for_timeout(2500)
