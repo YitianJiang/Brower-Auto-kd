@@ -864,6 +864,18 @@ def step_voucher(ui, inv_no):
     # ★ 必须先关掉占着这张单据的标签，否则报「该业务单据正在被 XX 使用，本次不生成凭证」
     closed = ui.close_all_tabs(keep_names=["销售增值税专用发票列表", "销售出库单列表"], quiet=True)
     log.info(f"生成凭证前清占单标签：关掉 {closed}")
+    # ★★ 2026-11-02（SF-75）：如果刚才有「- 新增 / - 修改」标签是被
+    #   `kendomainTabControl.remove()` **强摘**的，DOM 虽然没了，但服务端单据占用锁还在
+    #   → 后面点「生成凭证」100% 报「该业务单据正在被蒋一天使用」，白跑一轮还要再断一次。
+    #   实测 AR105-202610-0014：强摘后连重试 gy3_4_voucher 也一直报同一句，等 >30 分钟仍不放。
+    #   ⇒ 提前抛，把处置动作写清楚：**重登**是唯一可靠解法，且专票已审核、别再重推。
+    if ui.force_removed_bill_tabs:
+        raise RuntimeError(
+            "占单标签被强摘，服务端单据锁未释放（SF-75）："
+            f"{ui.force_removed_bill_tabs} —— 现在生成凭证必报「该业务单据正在被 XX 使用」。"
+            "请重新登录金蝶后再补："
+            f"python src/gy3_4_voucher.py --inv {inv_no or '<票号>'} --go，"
+            "然后 write_digest.py 写摘要。**不要重推专票**（票已保存并审核，会推重）。")
 
     ui.open_invoice_list()
     # ★ 2026-10-29：同 step_invoice，开页 ≠ 激活页；在错误的列表上勾专票号会勾空。

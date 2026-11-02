@@ -211,6 +211,11 @@ class KingdeeUI:
         self.cfg = cfg
         self.log = log
         self.guard = guard
+        # ★ 2026-11-02（SF-75）：被 `kendomainTabControl.remove()` **强摘**的占单标签
+        #   （「XX - 新增 / - 修改」）。强摘只摘 DOM，服务端「单据占用」锁不会释放，
+        #   后续「生成凭证」必然报「该业务单据正在被 XX 使用」。
+        #   记下来，让 step_voucher 提前给出可执行的处置提示，而不是白跑一遍凭证报告。
+        self.force_removed_bill_tabs = []
 
     # ---------- 导航 ----------
     def goto(self, url):
@@ -3828,6 +3833,16 @@ class KingdeeUI:
                     self.page.wait_for_timeout(600)
                     if tuple(sorted((x.get("text") or "") for x in self.tabs())) != sig_before:
                         closed.append(t.get("text") or "")
+                        _txt = t.get("text") or ""
+                        # ★ 2026-11-02（SF-75）：强摘「- 新增 / - 修改」这类占单标签，
+                        #   DOM 没了但服务端单据锁还在 → 后续生成凭证必报「正在被 XX 使用」。
+                        #   这里留痕，step_voucher 读到就提前停（重登是唯一可靠解法）。
+                        if any(k in _txt for k in ("- 新增", "- 修改")):
+                            self.force_removed_bill_tabs.append(_txt)
+                            self.log.warn(
+                                f"⚠️ 强摘占单标签 {_txt!r}：DOM 已移除，但服务端单据占用锁"
+                                f"不会随之释放（SF-75）；该单后续「生成凭证」会报"
+                                f"「正在被 XX 使用」，需重登后再做")
                         self.log.ok(f"标签 {t.get('text')!r} 点 ✕ 无反应 → 走 "
                                     f"kendomainTabControl.remove() 摘除成功")
                         continue
