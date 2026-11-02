@@ -39,9 +39,15 @@ GUARD = Guard(_CFG, log)
 
 
 def compute_digest(kq, ar_no, company):
+    """ar_no 可传逗号分隔的多张（同一单位多张应收单合并成一张发票时，摘要按合计数量算）。"""
+    ars = [x.strip() for x in str(ar_no or "").split(",") if x.strip()]
+    if len(ars) > 1:
+        cond = "FBillNo in (" + ",".join(f"'{a}'" for a in ars) + ")"
+    else:
+        cond = f"FBillNo = '{ars[0]}'"
     ent = kq.rows("AR_receivable",
                   "FMaterialId.FName,FPriceQty,F_PAEZ_BASEPROPERTY2",
-                  f"FBillNo = '{ar_no}'", top=500)
+                  cond, top=1000)
     rows = [{"material": r.get("FMaterialId.FName"),
              "qty": r.get("FPriceQty"),
              "category": r.get("F_PAEZ_BASEPROPERTY2")} for r in ent]

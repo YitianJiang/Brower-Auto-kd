@@ -172,17 +172,23 @@ def _since_str(minutes=3):
 #   修法：拿到专票号后**用来源应收单反查专票**（权威判据），不符就改用反查结果。
 #   —— 与 SF-55 同一课：**回读要读能反证的东西，不要读被写对象/被读对象自己**。
 # ------------------------------------------------------------------
-def _verify_iv_no(ui, inv_no, ar_no, tries=3, gap_ms=1200):
-    """用服务端反查校验专票号：必须能从来源应收单 `FSrcBillNo` 反查到。不符则纠正。"""
-    if not ar_no:
+def _verify_iv_no(ui, inv_no, ar_no, tries=3, gap_ms=1200, expect_all=None):
+    """用服务端反查校验专票号：必须能从来源应收单 `FSrcBillNo` 反查到。不符则纠正。
+
+    多张应收单合并成一张票时，候选里会同时出现**该客户以前开的票**（例如红字合并前
+    的那张蓝票），所以传 `expect_all` 时只保留「价税合计 == 期望值」的候选。
+    """
+    ars = _split_ars(ar_no)
+    if not ars:
         return inv_no
     from kdquery import KdQuery
+    cond = _ar_cond(ars, "FSrcBillNo")
     hits = []
     for i in range(1, max(1, tries) + 1):
         try:
             hits = [str(x.get("FBillNo")) for x in
-                    (KdQuery(ui.page).rows("IV_SALESIC", "FBillNo",
-                                           f"FSrcBillNo = '{ar_no}'", top=10) or [])]
+                    (KdQuery(ui.page).rows("IV_SALESIC", "FBillNo", cond, top=200) or [])]
+            hits = list(dict.fromkeys(hits))          # 一张票多行 → 去重保序
         except Exception as e:  # noqa: BLE001
             log.warn(f"专票号反查（来源应收单 {ar_no}）第 {i} 次失败：{str(e)[:90]}")
             hits = []
@@ -194,6 +200,23 @@ def _verify_iv_no(ui, inv_no, ar_no, tries=3, gap_ms=1200):
         log.warn(f"★ 反查不到 {ar_no} 下推的专票（界面读到 {inv_no!r}）—— 保留界面值，"
                  f"但下游勾单前请人工确认")
         return inv_no
+    if expect_all is not None and len(hits) > 1:
+        keep = []
+        for h in hits:
+            try:
+                rows = KdQuery(ui.page).rows("IV_SALESIC", "FBillNo,FALLAMOUNT",
+                                             f"FBillNo = '{h}'", top=5000)
+                tot = sum(to_d(r["FALLAMOUNT"]) for r in rows)
+            except Exception:  # noqa: BLE001
+                continue
+            if tot == to_d(expect_all):
+                keep.append(h)
+        if keep:
+            if len(keep) > 1:
+                log.warn(f"反查匹配到多张同额专票 {keep}（该应收单曾重推过），取最新一张")
+            hits = keep
+        else:
+            log.warn(f"反查候选 {hits} 中没有价税合计 == {_money(to_d(expect_all))} 的票")
     if inv_no and inv_no not in hits:
         log.warn(f"★★ 界面读到的专票号 {inv_no} 与来源应收单 {ar_no} **对不上**"
                  f"（服务端反查 = {hits}）→ 以服务端为准，改用 {hits[-1]}")
@@ -652,12 +675,35 @@ AMT_KEYS = ("notax", "tax", "all")
 AMT_NAMES = {"notax": "不含税", "tax": "税额", "all": "价税合计"}
 
 
+def _split_ars(ar_no):
+    """`--ar-no` 支持单号，也支持逗号分隔的多张（多选合并下推一张票）。"""
+    if isinstance(ar_no, (list, tuple)):
+        return [str(x).strip() for x in ar_no if str(x).strip()]
+    return [x.strip() for x in str(ar_no or "").split(",") if x.strip()]
+
+
+def _ar_cond(ar_no, field="FBillNo"):
+    ars = _split_ars(ar_no)
+    if not ars:
+        return ""
+    if len(ars) == 1:
+        return f"{field} = '{ars[0]}'"
+    return f"{field} in (" + ",".join(f"'{a}'" for a in ars) + ")"
+
+
 def _ar_amounts(kq, ar_no):
-    """服务端读应收单明细三项金额（原币）→ ({'notax','tax','all'}, 明细行数)。"""
+    """服务端读应收单明细三项金额（原币）→ ({'notax','tax','all'}, 明细行数)。
+
+    支持 `--ar-no` 传多张（逗号分隔）：多张时**合计**，用于「同一单位多张应收单
+    合并下推一张票」的三项精确校验。
+    """
+    cond = _ar_cond(ar_no)
+    if not cond:
+        return None, 0
     # ⚠️ 明细只放明细字段：混单头字段会被去重成单据头条数（SF-66）
     det = kq.rows("AR_receivable",
                   "FMaterialId.FNumber," + ",".join(AR_AMT_ENTRY_FIELDS),
-                  f"FBillNo = '{ar_no}'", top=2000)
+                  cond, top=4000)
     if not det:
         return None, 0
     return {k: sum(to_d(r[f]) for r in det) for k, f in zip(AMT_KEYS, AR_AMT_ENTRY_FIELDS)}, len(det)
@@ -757,8 +803,26 @@ def _verify_invoice_saved(ui, inv_no, ar_no, log):
 
 
 def step_invoice(ui, args, ar_no):
-    if not ar_no:
+    ars = _split_ars(ar_no)
+    if not ars:
         raise RuntimeError("没有应收单号，无法下推专票（请用 --step receivable 先做，或 --ar-no 指定）")
+    if len(ars) > 1:
+        log.info(f"★ 多张应收单合并下推一张专票：{ars}（同一单位多张应收单 → 一张发票）")
+        # ★ 合并的前提是**同一客户**：跨客户合并会把两个单位的票开成一张，直接停。
+        try:
+            from kdquery import KdQuery
+            _rows = KdQuery(ui.page).rows("AR_receivable", "FBillNo,FCUSTOMERID.FName",
+                                          _ar_cond(ars), top=500)
+            _custs = sorted({str(r.get("FCUSTOMERID.FName")) for r in _rows})
+            if len(_custs) != 1:
+                raise RuntimeError(
+                    f"多张应收单不属于同一客户：{_custs} —— 拒绝合并成一张发票。"
+                    f"同一单位才能合并下推（--ar-no 用逗号分隔）。")
+            log.ok(f"合并目标客户：{_custs[0]}（{len(ars)} 张应收单）")
+        except RuntimeError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.warn(f"客户一致性反查失败（{str(e)[:100]}）—— 继续，但下推后靠金额三项校验兜底")
     merge = bool(args.invoice_merge)      # 2026-11-01 起默认不合并，见 build_args 注释
     log.info(f"★ 下推专票转换规则 = {'分录合并（不推荐）' if merge else '分录不合并（逐行对应，不产生子单）'}")
     if merge:
@@ -793,14 +857,33 @@ def step_invoice(ui, args, ar_no):
     #   --ar-no 复用的目标单号大概率不在第一页 → select_rows 扫不到会抛「找不到可见网格」。
     #   先按单据编号过滤成只这一张，让它排到第一页再勾。
     try:
-        n_f = ui.set_bill_no_filter([ar_no], field="FBillNo", verify=True)
-        log.info(f"按单号过滤 {ar_no} → 列表 {n_f} 行")
+        n_f = ui.set_bill_no_filter(ars, field="FBillNo", verify=True)
+        log.info(f"按单号过滤 {ars} → 列表 {n_f} 行")
     except Exception as e:  # noqa: BLE001
         log.warn(f"按单号过滤失败（{str(e)[:100]}），退回直接勾选（可能翻不到页）")
+    # ★ 应收单列表是**明细行列表**（一行 = 一条物料明细），不是一张单一行：
+    #   2026-11-02 实测 0047(1 行)+0049(38 行) 过滤后列表 39 行。多选合并时必须把
+    #   **所有明细行**都勾上，少一行就是少开一项货 —— 期望值取服务端明细行数。
+    exp_rows = None
+    try:
+        from kdquery import KdQuery
+        _det = KdQuery(ui.page).rows("AR_receivable", "FMaterialId.FNumber",
+                                     _ar_cond(ars), top=4000)
+        exp_rows = len(_det)
+        log.info(f"服务端应收明细 {exp_rows} 行（过滤后列表应同此数）")
+    except Exception as e:  # noqa: BLE001
+        log.warn(f"服务端明细行数反查失败（{str(e)[:100]}）—— 只用界面命中数兜底")
     # strict=True：内部带「等遮罩 + 逐个回读 + 3 轮重试」，重试完仍少行就抛错（SF-70）
-    n = ui.select_rows([ar_no], strict=True)
+    n = ui.select_rows(ars, strict=True)
     real = ui.selected_count()
-    log.info(f"应收单列表勾选 {ar_no} → 命中 {n} 行，真实选中 {real} 行")
+    log.info(f"应收单列表勾选 {ars} → 命中 {n} 行，真实选中 {real} 行")
+    if exp_rows is not None and (real is None or real != exp_rows):
+        shot(ui.page, SHOT_DIR, "select_multi_mismatch", log)
+        msg = (f"勾选行数与服务端不符：{ars} 应有 {exp_rows} 行明细，列表命中 {n}、"
+               f"真实选中 {real} —— 少勾的行不会进这张发票。")
+        if len(ars) > 1:
+            raise RuntimeError(msg + " 已停止（未下推）。")
+        log.warn(msg + "（单张单继续，靠下推后的三项金额校验兜底）")
     # ★★ 2026-10-31 修正（SF-69）：这里勾的是**应收单列表**（一张单一行），
     #   旧代码却拿「应收单明细行数」当期望值 —— 口径根本不匹配：
     #     · 若服务端查询被去重成 1 行 → 期望 1、实际 1，护栏**空转**（10/31 杭州 8 张
@@ -849,7 +932,7 @@ def step_invoice(ui, args, ar_no):
     inv_no = _read_no(ui, "FBillNo")
     if not inv_no:
         inv_no = _backfill_no(ui, "iv", since=_since_str(3))
-    inv_no = _verify_iv_no(ui, inv_no, ar_no)   # ★ 服务端反证：读数必须能被来源应收单反查到
+    inv_no = _verify_iv_no(ui, inv_no, ar_no, expect_all=tot)   # ★ 服务端反证：读数必须能被来源应收单反查到
     log.ok(f"专票已保存：{inv_no or '(单号未读到)'}")
     # ★ 2026-11-01（SF-72）：保存前比的是界面读数，保存后必须回读服务端再比一次三项金额
     _verify_invoice_saved(ui, inv_no, ar_no, log)

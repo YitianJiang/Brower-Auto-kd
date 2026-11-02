@@ -273,10 +273,58 @@ class KingdeeUI:
             document.querySelectorAll('input.kd-appplat-searchinput')).filter(vis)[0])"""
         return bool(eval_all_frames(self.page, js))
 
+    def _block_mask_visible(self):
+        js = self._INVISIBLE + """() => !!Array.from(
+            document.querySelectorAll('div.kd-ui-blockingExtention-item')).filter(vis)[0]"""
+        return bool(eval_all_frames(self.page, js))
+
+    def clear_block_mask(self, timeout_ms=2500):
+        """等金蝶的异步遮罩消失；**卡死**（无弹窗、无 overlay）时再摘掉它。
+
+        SF-70：`DIV.kd-ui-blockingExtention-item` 是金蝶异步校验时盖的全屏点击拦截层，
+        它会**吃掉点击且不报错**（点空）。正常情况几百毫秒自己消失；
+        但实测会「卡死」——没有任何 .k-window、没有 .k-overlay，遮罩却一直挂着，
+        之后所有 `locator.click` 都报 `... intercepts pointer events`（2026-11-02 12:30
+        试推广源时顶部搜索图标就是这样被挡死的，连 open_menu_by_search 都进不去）。
+        判据：**无可见弹窗 + 无 overlay + 遮罩仍在** ⇒ 判定卡死，摘除。
+        """
+        step, waited = 150, 0
+        while waited < timeout_ms:
+            if not self._block_mask_visible():
+                return True
+            self.page.wait_for_timeout(step)
+            waited += step
+        if not self._block_mask_visible():
+            return True
+        js = """() => {
+            const vis = e => { const r=e.getBoundingClientRect(); const s=getComputedStyle(e);
+                return r.width>0 && r.height>0 && s.visibility!=='hidden' && s.display!=='none'; };
+            const wins = Array.from(document.querySelectorAll('.k-window')).filter(vis).length;
+            const ov = Array.from(document.querySelectorAll('.k-overlay')).filter(vis).length;
+            const masks = Array.from(document.querySelectorAll('div.kd-ui-blockingExtention-item'))
+                              .filter(vis);
+            if (wins === 0 && ov === 0 && masks.length) {
+                masks.forEach(m => { const p = m.parentElement; m.remove();
+                                     if (p && !p.querySelector('div.kd-ui-blockingExtention-item')) p.remove(); });
+                return masks.length;
+            }
+            return 0;
+        }"""
+        n = eval_all_frames(self.page, js) or 0
+        if n:
+            self.log.warn(f"遮罩卡死（无弹窗/无 overlay）→ 摘除 {n} 个 kd-ui-blockingExtention-item")
+            self.page.wait_for_timeout(400)
+            return not self._block_mask_visible()
+        return False
+
     def open_search_panel(self):
         """打开顶部全功能搜索面板（已开着就原样返回）"""
         if self._search_panel_open():
             return True
+        # ★ 2026-11-02：遮罩会挡死顶部搜索图标，先等/清（SF-70）
+        if self._block_mask_visible():
+            self.log.warn("顶部搜索图标被遮罩挡住 → 先等遮罩消失（SF-70）")
+            self.clear_block_mask()
         icon = self.page.locator(".kd-fullsearch-searchicon:visible").first
         if icon.count() == 0:
             self.page.keyboard.press("Escape")
