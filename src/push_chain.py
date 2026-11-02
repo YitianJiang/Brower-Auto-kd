@@ -24,6 +24,13 @@ python src/push_chain.py ...
 # ★ 对照实验：同一张已审核应收单，只重跑「下推专票」这一段（不建应收单）
 python src/push_chain.py --ar-no AR105-202609-0004 --step invoice --yes
 
+# ★ 同一单位多张应收单 → 合并下推**一张**发票（2026-11-02 华淳/广源实测）
+#   前提：① 同客户（跨客户直接报错）；② 每张都**尚未下推**（已开票的行会被金蝶静默跳过，SF-78）
+python src/push_chain.py --ar-no "AR105-202610-0046,AR105-202610-0050" \
+    --biz-date 2026-10-31 --invoice-date 2026-10-31 --step voucher --yes
+python src/write_digest.py --ar-no "AR105-202610-0046,AR105-202610-0050" \
+    --company 桐乡市华淳贸易有限公司 --go
+
 参数速查
 --------
   --bill-nos      指定出库单号（逗号分隔）；给了它就不按日期筛
@@ -36,6 +43,9 @@ python src/push_chain.py --ar-no AR105-202609-0004 --step invoice --yes
   --step          跑到哪一步为止：receivable | invoice | voucher(默认，全链)
   --invoice-merge 用「分录合并」下推专票（**不建议**；默认不合并，故一般不用传任何参数）
   --ar-no         复用已有应收单号（跳过筛选/建单，只跑 invoice/voucher）
+                  ★ 逗号分隔多张 = 同一单位多张应收单合并开一张票：
+                    --ar-no "AR105-202610-0046,AR105-202610-0050"
+                    行数期望取服务端明细行数合计、三项金额按多张合计精确校验
   --yes           放行不可逆动作（保存/提交/审核/生成凭证）
   --dry-run       只读不写：筛选 + 读明细 + 打印分摊结果，不点任何保存/下推
   --no-clean-tabs 结束后不清标签页
@@ -99,7 +109,9 @@ def parse_args():
     ap.add_argument("--no-invoice-merge", action="store_true",
                     help="（兼容旧命令，已是默认行为，传了也无副作用）")
     ap.add_argument("--ar-no", default="",
-                    help="复用已有应收单号（只跑 --step invoice/voucher 时用，跳过出库单筛选与建单）")
+                    help="复用已有应收单号（只跑 --step invoice/voucher 时用，跳过出库单筛选与建单）。"
+                         "★ 支持逗号分隔多张：'AR1,AR2' = 同一单位多张应收单合并下推**一张**专票"
+                         "（跨客户会直接报错；各单须均未下推过）")
     ap.add_argument("--yes", action="store_true", help="放行不可逆动作")
     ap.add_argument("--dry-run", action="store_true", help="只读不写")
     ap.add_argument("--no-clean-tabs", action="store_true", help="结束后不清标签")

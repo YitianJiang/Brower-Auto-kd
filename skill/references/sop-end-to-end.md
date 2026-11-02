@@ -197,6 +197,34 @@ python src/push_chain.py --ar-no AR105-202609-0004 --step invoice --no-invoice-m
 `--checker 姚玉平` / `--yes` / `--dry-run` / `--no-clean-tabs`。
 `run.py`（Excel 驱动、批量、可回写）与 `push_chain.py` 共用同一套 `KingdeeUI` + `discount.py`。
 
+### 6.1 同一单位多张应收单 → 合并下推**一张**发票
+
+`--ar-no` 支持逗号分隔多张（2026-11-02 华淳 0046+0050、广源 0047+0049 实测打通，
+实现见 `push_chain.py` 的 `_split_ars` / `_ar_cond` / `step_invoice`）。
+
+```bash
+# 一条命令跑完 专票 → 提交(审核) → 凭证
+python src/push_chain.py --ar-no "AR105-202610-0046,AR105-202610-0050" \
+    --biz-date 2026-10-31 --invoice-date 2026-10-31 --step voucher --yes
+# 摘要按多张合计数量算（同样传逗号多张）
+python src/write_digest.py --ar-no "AR105-202610-0046,AR105-202610-0050" \
+    --company 桐乡市华淳贸易有限公司 --go
+```
+
+已固化的四道护栏：
+
+| 护栏 | 位置 | 不满足时 |
+|---|---|---|
+| 同客户校验 | `step_invoice` 多张分支（`FCUSTOMERID.FName` 去重后必须只有 1 个） | **抛错**，拒绝合并 |
+| 行数期望 = 服务端明细行数**合计**（不是单数） | `step_invoice` 勾选前 | 选中数≠期望 → **抛错**（多张时不容忍） |
+| 三项金额按多张**合计**精确相等 | `_verify_invoice_vs_ar` / `_ar_amounts` | 差 1 分 → 抛错，**不保存** |
+| 下推后扫「网控提示」 | `_netlock_conflict` | 点取消 + 抛错，**绝不点继续** |
+
+两个前提（代码挡不住，靠操作保证）：
+1. **每张应收单都必须尚未下推**——已开过票的行会被金蝶**静默跳过**（SF-78），
+   界面不报错，只表现为票据行数变少；有旧票先反审核+删除释放下推状态。
+2. 转换中断会给自己留**网控锁**（SF-79），不会自动过期，**先重登再重试**。
+
 ## 8. 仍需人来定的四件事（系统里取不到）
 
 1. **扣款金额 D**（少收多少）
