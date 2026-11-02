@@ -63,3 +63,4 @@ src/set_bill_date.py
 
 # 临时探针/调试脚本（一次性，不入库）
 .tmp/
+!src/xcheck_repush_20261102.py
