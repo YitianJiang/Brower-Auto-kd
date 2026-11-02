@@ -1001,18 +1001,17 @@ def step_voucher(ui, inv_no):
     # ★ 必须先关掉占着这张单据的标签，否则报「该业务单据正在被 XX 使用，本次不生成凭证」
     closed = ui.close_all_tabs(keep_names=["销售增值税专用发票列表", "销售出库单列表"], quiet=True)
     log.info(f"生成凭证前清占单标签：关掉 {closed}")
-    # ★★ 2026-11-02（SF-75）：如果刚才有「- 新增 / - 修改」标签是被
-    #   `kendomainTabControl.remove()` **强摘**的，DOM 虽然没了，但服务端单据占用锁还在
-    #   → 后面点「生成凭证」100% 报「该业务单据正在被蒋一天使用」，白跑一轮还要再断一次。
-    #   实测 AR105-202610-0014：强摘后连重试 gy3_4_voucher 也一直报同一句，等 >30 分钟仍不放。
-    #   ⇒ 提前抛，把处置动作写清楚：**重登**是唯一可靠解法，且专票已审核、别再重推。
+    # ★★ 2026-11-02（SF-75）：强摘（`kendomainTabControl.remove()`）只把 DOM 摘掉，
+    #   服务端单据占用锁可能没释放 → 生成凭证会报「该业务单据正在被 XX 使用」。
+    #   ★ 2026-11-02 二次修正：**不再提前硬抛**。实测浙江三阳 AR105-202610-0018，
+    #     强摘的是「应收单 - 新增」，而凭证来源是**专票**，两者不是同一张单据
+    #     → gy3_4_voucher 一次成功（转223）。反例 AR105-202610-0014 强摘的是专票「修改」页，
+    #     锁就压在同一张专票上，才真的报占用。
+    #   ⇒ 判据从「有没有强摘过」降级为「报告里有没有真报占用」：先真试一次（失败不产生脏数据），
+    #     只有报告命中占用关键字才按 SF-75 抛错。避免让用户为一次未发生的冲突白重登。
     if ui.force_removed_bill_tabs:
-        raise RuntimeError(
-            "占单标签被强摘，服务端单据锁未释放（SF-75）："
-            f"{ui.force_removed_bill_tabs} —— 现在生成凭证必报「该业务单据正在被 XX 使用」。"
-            "请重新登录金蝶后再补："
-            f"python src/gy3_4_voucher.py --inv {inv_no or '<票号>'} --go，"
-            "然后 write_digest.py 写摘要。**不要重推专票**（票已保存并审核，会推重）。")
+        log.warn(f"★ 强摘过占单标签 {ui.force_removed_bill_tabs} —— 服务端锁可能未释放（SF-75），"
+                 f"先真试一次生成凭证；若报告报「正在被 XX 使用」，需重登后再补（不要重推专票）")
 
     ui.open_invoice_list()
     # ★ 2026-10-29：同 step_invoice，开页 ≠ 激活页；在错误的列表上勾专票号会勾空。
@@ -1042,6 +1041,15 @@ def step_voucher(ui, inv_no):
         for e in errs:
             log.err(f"凭证生成失败 {e.get('单据编号')} [{e.get('检查项')}] {e.get('提示信息')}")
         shot(ui.page, SHOT_DIR, "pushchain_voucher_error", log)
+        # ★ SF-75：报告里真报「该业务单据正在被 XX 使用」= 服务端单据锁没释放，
+        #   重试无效（实测等 >30 分钟也不放），唯一解法是重登；专票已审核，绝不重推。
+        _busy = [e for e in errs if "使用" in str(e.get("提示信息") or "")]
+        if _busy:
+            raise RuntimeError(
+                "生成凭证报「单据正在被使用」= 服务端单据占用锁未释放（SF-75）："
+                f"{_busy[0].get('提示信息')} —— 请重新登录金蝶后再补："
+                f"python src/gy3_4_voucher.py --inv {inv_no} --go，然后 write_digest.py 写摘要。"
+                "**不要重推专票**（票已保存并审核，会推重）。")
         raise RuntimeError("凭证生成报告有错误，停止")
     log.ok("凭证生成报告 0 错误")
 

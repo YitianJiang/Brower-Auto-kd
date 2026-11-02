@@ -3395,6 +3395,10 @@ class KingdeeUI:
         **「警告」** 而不是「错误」，过去只认「错误」导致把失败误判成「0 错误→成功」，
         继续往下跑，最后在「查看业务凭证」时勾不到行报 out of range（静默漏单）。
         ⇒ 现在「错误」，或任意字段值里含「凭证生成失败」，都算失败。
+
+        ⚠️ 2026-11-02 补充（SF-75）：单据被占用时提示类型是**「其他」**、提示信息
+        「该业务单据正在被 XX 使用，本次不生成凭证」—— 既不含「错误」也不含「凭证生成失败」，
+        过去会被判成 0 错误 → 静默漏凭证。⇒ 含「本次不生成凭证」或「正在被…使用」也算失败。
         """
         rep = self.read_voucher_report() or []
         out = []
@@ -3403,7 +3407,9 @@ class KingdeeUI:
             msg = str(r.get("提示信息", ""))
             if "错误" in t:
                 out.append(r)
-            elif "凭证生成失败" in msg or "凭证生成失败" in str(r.values()):
+            elif ("凭证生成失败" in msg or "凭证生成失败" in str(r.values())
+                  or "本次不生成凭证" in msg
+                  or ("正在被" in msg and "使用" in msg)):
                 out.append(r)
         return out
 
